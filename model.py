@@ -336,6 +336,29 @@ class Seq2SeqTransformer(nn.Module):
         Prepare the model for Quantization Aware Training.
         """
         self.train()
+
+        # Workaround for a PyTorch bug where NonDynamicallyQuantizableLinear
+        # (used in nn.MultiheadAttention) causes an assertion error in QAT.
+        # We replace them with standard nn.Linear.
+        for name, module in self.named_modules():
+            if "NonDynamicallyQuantizableLinear" in str(type(module)):
+                # Get the parent module and the attribute name
+                parts = name.split(".")
+                parent = self
+                for part in parts[:-1]:
+                    parent = getattr(parent, part)
+                attr_name = parts[-1]
+
+                # Replace with standard Linear
+                new_linear = nn.Linear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                )
+                new_linear.load_state_dict(module.state_dict())
+                setattr(parent, attr_name, new_linear)
+                print(f"Replaced {name} with standard nn.Linear for QAT compatibility")
+
         # Set quantization configuration
         if backend == "fbgemm":
             # For x86

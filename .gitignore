@@ -217,4 +217,5 @@ tokenizer_src.model
 tokenizer_src.vocab
 tokenizer_tgt.model
 tokenizer_tgt.vocab
+checkpoint*
 

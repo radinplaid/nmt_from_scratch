@@ -31,12 +31,12 @@ class TrainConfig:
     grad_clip: float = 1.0
     accum_steps: int = 3
     warmup_steps: int = 10000
-    max_steps: int = 40000
+    max_steps: int = 20000
     eval_steps: int = 1000
     max_checkpoints: int = 4
     checkpoint_dir: str = "checkpoints"
     use_qat: bool = True
-    qat_start_step: int = 20000
+    qat_start_step: int = 10000
 
     # Data params
     src_lang: str = "fa"
