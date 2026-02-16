@@ -93,6 +93,21 @@ def main():
     parser.add_argument("--output_dir", type=str, default="ct2_model")
     parser.add_argument("--src_vocab", type=str, default="tokenizer_src.vocab")
     parser.add_argument("--tgt_vocab", type=str, default="tokenizer_tgt.vocab")
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=[
+            "int8",
+            "int8_float32",
+            "int8_float16",
+            "int8_bfloat16",
+            "int16",
+            "float16",
+            "bfloat16",
+            "float32",
+        ],
+    )
     args = parser.parse_args()
 
     # 1. Load config and weights
@@ -225,7 +240,7 @@ def main():
     except Exception as e:
         print(f"Model validation failed: {e}")
 
-    spec.optimize()
+    spec.optimize(quantization=args.quantization)
     spec.save(args.output_dir)
     print(f"Model saved to {args.output_dir}")
 

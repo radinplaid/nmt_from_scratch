@@ -1,7 +1,6 @@
 import torch
 import torch.optim as optim
-from dataclasses import dataclass
-from config import ModelConfig, TrainConfig
+from config import ModelConfig, TrainConfig, DataConfig
 
 from model import Seq2SeqTransformer
 from data import PrepareData
@@ -48,26 +47,7 @@ def train():
     # Data
     print(f"{get_time_info()} Preparing data...")
 
-    # PrepareData needs vocab_size/max_len from model_cfg AND batch_size/tokens from train_cfg
-    # Let's pass a merged object or just both
-    # Updating PrepareData signature to accept 'config' which has what we need.
-    # The simplest fix without changing PrepareData signature (which takes 'config')
-    # is to create a merged config object or MonkeyPatch.
-    # Let's make a merged config for data prep.
-    @dataclass
-    class DataConfig:
-        vocab_size: int = model_cfg.vocab_size
-        max_len: int = model_cfg.max_len
-        batch_size: int = train_cfg.batch_size
-        max_tokens_per_batch: int = train_cfg.max_tokens_per_batch
-        src_train_path: str = train_cfg.src_train_path
-        tgt_train_path: str = train_cfg.tgt_train_path
-        src_dev_path: str = train_cfg.src_dev_path
-        tgt_dev_path: str = train_cfg.tgt_dev_path
-        buffer_size: int = train_cfg.buffer_size
-        num_workers: int = train_cfg.num_workers
-
-    data_cfg = DataConfig()
+    data_cfg = DataConfig.from_configs(model_cfg, train_cfg)
     train_loader, dev_loader, src_sp, tgt_sp = PrepareData(data_cfg)
 
     # Model
@@ -109,6 +89,24 @@ def train():
                 return (train_cfg.warmup_steps**0.5) * (step**-0.5)
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    global_step = 0
+
+    # Initial QAT check (for resuming or starting with QAT at step 0)
+    if train_cfg.use_qat and global_step >= train_cfg.qat_start_step:
+        print(f"{get_time_info()} Enabling QAT at step {global_step}...")
+        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        raw_model.prepare_for_qat()
+        model = raw_model
+        # Re-initialize optimizer
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=train_cfg.lr,
+            weight_decay=train_cfg.weight_decay,
+            eps=train_cfg.adam_eps,
+        )
+        for group in optimizer.param_groups:
+            group["lr"] = scheduler.get_last_lr()[0]
+        scheduler.optimizer = optimizer
 
     def save_checkpoint(step, model, optimizer, scheduler, config):
         if not os.path.exists(config.checkpoint_dir):
@@ -137,6 +135,22 @@ def train():
             path_pt,
         )
         print(f"{get_time_info()} Training state saved: {path_pt}")
+
+        # If it's a quantized model, also save a converted version for inference
+        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        if hasattr(raw_model, "qconfig") and raw_model.qconfig is not None:
+            import copy
+
+            try:
+                quant_model = copy.deepcopy(raw_model)
+                quant_model.convert_to_int8()
+                quant_path = os.path.join(
+                    config.checkpoint_dir, f"model_{step}_int8.pt"
+                )
+                torch.save(quant_model.state_dict(), quant_path)
+                print(f"{get_time_info()} Exported INT8 model: {quant_path}")
+            except Exception as e:
+                print(f"{get_time_info()} Could not export INT8 model: {e}")
 
         # Rotation
         def get_step(f):
@@ -255,7 +269,6 @@ def train():
 
     # Loop
     model.train()
-    global_step = 0
     optimizer.zero_grad()
     for epoch in range(train_cfg.epochs):
         start_time = time.time()
@@ -310,6 +323,37 @@ def train():
                 accum_loss = 0
                 accum_tokens = 0
                 global_step += 1
+
+                # QAT Transition
+                if train_cfg.use_qat and global_step == train_cfg.qat_start_step:
+                    print(
+                        f"{get_time_info()} Transitioning to Quantization Aware Training (QAT)..."
+                    )
+                    # Unwrap if compiled
+                    raw_model = (
+                        model._orig_mod if hasattr(model, "_orig_mod") else model
+                    )
+                    # Need to move to CPU for prepare_qat in some torch versions, then back to GPU
+                    # but fake_quant works on GPU.
+                    raw_model.prepare_for_qat()
+                    model = raw_model  # Disable torch.compile during QAT for stability
+
+                    # Re-initialize optimizer because modules were swapped
+                    optimizer = optim.AdamW(
+                        model.parameters(),
+                        lr=train_cfg.lr,
+                        weight_decay=train_cfg.weight_decay,
+                        eps=train_cfg.adam_eps,
+                    )
+                    # We might want to keep the scheduler progress
+                    # scheduler.optimizer = optimizer # Some schedulers support this
+                    # But LambdaLR is simple enough to just recreate if we want,
+                    # or just update the optimizer reference.
+                    for group in optimizer.param_groups:
+                        group["lr"] = scheduler.get_last_lr()[0]
+                    scheduler.optimizer = optimizer
+
+                    print(f"{get_time_info()} Optimizer re-initialized for QAT.")
 
                 # Validation and Checkpointing
                 if global_step % train_cfg.eval_steps == 0:

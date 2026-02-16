@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import torch.ao.quantization
 
 
 class PositionalEncoding(nn.Module):
@@ -76,6 +77,10 @@ class Seq2SeqTransformer(nn.Module):
 
         self.generator = nn.Linear(config.d_model, config.vocab_size)
 
+        # Quantization stubs
+        self.quant = torch.ao.quantization.QuantStub()
+        self.dequant = torch.ao.quantization.DeQuantStub()
+
         # Initialize parameters
         for p in self.parameters():
             if p.dim() > 1:
@@ -83,7 +88,9 @@ class Seq2SeqTransformer(nn.Module):
 
     def encode(self, src, src_mask=None):
         src_emb = self.positional_encoding(self.src_tok_emb(src))
-        return self.encoder(src_emb, src_key_padding_mask=(src == 0))
+        src_emb = self.quant(src_emb)
+        memory = self.encoder(src_emb, src_key_padding_mask=(src == 0))
+        return self.dequant(memory)
 
     def decode(
         self,
@@ -95,7 +102,13 @@ class Seq2SeqTransformer(nn.Module):
         memory_key_padding_mask=None,
     ):
         tgt_emb = self.positional_encoding(self.tgt_tok_emb(tgt))
-        return self.decoder(
+        tgt_emb = self.quant(tgt_emb)
+        # memory should already be dequantized from encode(), so we might need to quantize it again?
+        # Actually, in PyTorch QAT, submodules handle their own quantization.
+        # If memories are passed between encoded/decoded, we can either keep them quantized or dequantize.
+        # Standard practice is to dequantize at output of modules.
+        memory = self.quant(memory)
+        out = self.decoder(
             tgt_emb,
             memory,
             tgt_mask=tgt_mask,
@@ -103,6 +116,10 @@ class Seq2SeqTransformer(nn.Module):
             tgt_key_padding_mask=tgt_key_padding_mask,
             memory_key_padding_mask=memory_key_padding_mask,
         )
+        return self.dequant(out)
+
+    def project(self, x):
+        return self.dequant(self.generator(self.quant(x)))
 
     def forward(self, src, tgt, return_outputs=False, label_smoothing=0.0):
         # src: (batch, src_len)
@@ -127,13 +144,11 @@ class Seq2SeqTransformer(nn.Module):
         )
 
         # 1. Encode
-        src_emb = self.positional_encoding(self.src_tok_emb(src))
-        memory = self.encoder(src_emb, src_key_padding_mask=src_padding_mask)
+        memory = self.encode(src)
 
         # 2. Decode
-        tgt_emb = self.positional_encoding(self.tgt_tok_emb(tgt_input))
-        outs = self.decoder(
-            tgt_emb,
+        outs = self.decode(
+            tgt_input,
             memory,
             tgt_mask=tgt_mask,
             tgt_key_padding_mask=tgt_padding_mask,
@@ -141,7 +156,7 @@ class Seq2SeqTransformer(nn.Module):
         )
 
         # 3. Project
-        logits = self.generator(outs)  # (batch, tgt_len-1, vocab)
+        logits = self.project(outs)
 
         # 4. Loss
         # We use reduction='sum' for strict token-based normalization in training
@@ -187,7 +202,7 @@ class Seq2SeqTransformer(nn.Module):
             )
 
             # Project last token
-            prob = self.generator(out[:, -1])
+            prob = self.project(out[:, -1])
             _, next_word = torch.max(prob, dim=1)
 
             # Only update sequences that haven't finished
@@ -260,7 +275,7 @@ class Seq2SeqTransformer(nn.Module):
             )
 
             # Logits for last token: (bs*beam, vocab)
-            logits = self.generator(out[:, -1])
+            logits = self.project(out[:, -1])
             log_probs = torch.log_softmax(logits, dim=-1)
 
             # Reshape back to (bs, beam, vocab)
@@ -310,8 +325,53 @@ class Seq2SeqTransformer(nn.Module):
 
             inputs = torch.stack(new_inputs)
 
-            # Check EOS? (Optional optimization: stop if all top beams are EOS)
+        # Check EOS? (Optional optimization: stop if all top beams are EOS)
 
         # Return best beam
         # inputs: (bs, beam, seq) -> return (bs, seq) of best beam (index 0)
         return inputs[:, 0, 1:]  # Skip BOS
+
+    def prepare_for_qat(self, backend="fbgemm"):
+        """
+        Prepare the model for Quantization Aware Training.
+        """
+        self.train()
+        # Set quantization configuration
+        if backend == "fbgemm":
+            # For x86
+            self.qconfig = torch.ao.quantization.get_default_qat_qconfig("fbgemm")
+        else:
+            # For ARM/mobile
+            self.qconfig = torch.ao.quantization.get_default_qat_qconfig("qnnpack")
+
+        # Fuse modules if possible (Linear + ReLU/GELU)
+        # Note: nn.Transformer components are complex to fuse manually in Eager mode
+        # but we can try to fuse the generator if it had an activation.
+        # Here we just prepare the whole model.
+        torch.ao.quantization.prepare_qat(self, inplace=True)
+        print(f"Model prepared for QAT using {backend} backend")
+
+    def convert_to_int8(self):
+        """
+        Convert the QAT-trained model to a quantized INT8 model.
+        """
+        self.eval()
+        torch.ao.quantization.convert(self, inplace=True)
+        print("Model converted to INT8")
+
+    def calibrate(self, loader, num_batches=10):
+        """
+        Run a few batches of data through the model to update quantization observers.
+        This is useful after averaging weights.
+        """
+        device = next(self.parameters()).device
+        self.train()
+        # Ensure observers are enabled but weights are not updated via gradients
+        # PyTorch QAT modules handle this internally when in .train() but with no_grad()
+        with torch.no_grad():
+            for i, (src, tgt) in enumerate(loader):
+                if i >= num_batches:
+                    break
+                # Run forward pass (updates observers)
+                self.forward(src.to(device), tgt.to(device))
+        print(f"Calibration completed on {num_batches} batches")
