@@ -47,11 +47,14 @@ def test_validation():
     print("Testing forward pass...")
     model.eval()
     with torch.no_grad():
-        loss, (logits, _) = model(src, tgt, return_outputs=True)
+        loss_sum, (logits, num_tokens_batch) = model(src, tgt, return_outputs=True)
 
-    print(f"Loss shape: {loss.shape if hasattr(loss, 'shape') else 'scalar'}")
-    print(f"Loss value: {loss.item():.4f}")
+    print(f"Loss sum: {loss_sum.item():.4f}")
+    print(f"Num tokens: {num_tokens_batch}")
     print(f"Logits shape: {logits.shape}")
+
+    # Re-calculate as mean for comparison
+    loss_mean = loss_sum / num_tokens_batch
 
     # Test generate method
     print("\nTesting generate method...")
@@ -131,8 +134,8 @@ def test_validation():
             manual_loss = 0
 
         print(f"Manual loss: {manual_loss:.4f}")
-        print(f"Model loss: {loss.item():.4f}")
-        print(f"Difference: {abs(manual_loss - loss.item()):.6f}")
+        print(f"Model loss (mean): {loss_mean.item():.4f}")
+        print(f"Difference: {abs(manual_loss - loss_mean.item()):.6f}")
 
     print("\n✓ All tests passed!")
     return True

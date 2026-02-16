@@ -54,7 +54,9 @@ class Seq2SeqTransformer(nn.Module):
             activation="gelu",
         )
         self.encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=config.enc_layers
+            encoder_layer,
+            num_layers=config.enc_layers,
+            norm=nn.LayerNorm(config.d_model),
         )
 
         decoder_layer = nn.TransformerDecoderLayer(
@@ -67,7 +69,9 @@ class Seq2SeqTransformer(nn.Module):
             activation="gelu",
         )
         self.decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=config.dec_layers
+            decoder_layer,
+            num_layers=config.dec_layers,
+            norm=nn.LayerNorm(config.d_model),
         )
 
         self.generator = nn.Linear(config.d_model, config.vocab_size)
@@ -139,25 +143,24 @@ class Seq2SeqTransformer(nn.Module):
         # 3. Project
         logits = self.generator(outs)  # (batch, tgt_len-1, vocab)
 
-        if return_outputs:
-            # Calculate loss but also return logits
-            loss = nn.functional.cross_entropy(
-                logits.reshape(-1, self.config.vocab_size),
-                tgt_out.reshape(-1),
-                ignore_index=0,
-                label_smoothing=label_smoothing,
-            )
-            return loss, (logits, None)
-
         # 4. Loss
+        # We use reduction='sum' for strict token-based normalization in training
+        # tgt_out contains the targets (shifted right)
+        mask = tgt_out != 0
+        num_tokens = mask.sum()
+
         loss = nn.functional.cross_entropy(
             logits.reshape(-1, self.config.vocab_size),
             tgt_out.reshape(-1),
             ignore_index=0,
             label_smoothing=label_smoothing,
+            reduction="sum",
         )
 
-        return loss
+        if return_outputs:
+            return loss, (logits, num_tokens)
+
+        return loss, num_tokens
 
     @torch.no_grad()
     def generate(self, src, max_len=256, bos_id=2, eos_id=3, enc_output=None):
@@ -172,6 +175,7 @@ class Seq2SeqTransformer(nn.Module):
 
         # Start with BOS
         ys = torch.full((bs, 1), bos_id, dtype=torch.long, device=device)
+        finished = torch.zeros(bs, dtype=torch.bool, device=device)
 
         for i in range(max_len):
             # Decode
@@ -186,14 +190,15 @@ class Seq2SeqTransformer(nn.Module):
             prob = self.generator(out[:, -1])
             _, next_word = torch.max(prob, dim=1)
 
+            # Only update sequences that haven't finished
+            # If a sequence finished, we append PAD (0) or EOS (3)
+            # Here we just append the prediction, and we'll mask later or just accept it's "finished"
             ys = torch.cat([ys, next_word.unsqueeze(1)], dim=1)
 
-            # Check for EOS (simple check: if all have generated EOS at some point)
-            # For simplicity in this greedy loop, we just run to max_len or check if current all are EOS (unlikely for batch)
-            # Better: track finished status per sample.
-            # Here keeping consistent with previous simple implementation behavior?
-            # Previous one: "if (next_token == eos_id).all(): break"
-            if (next_word == eos_id).all():
+            # Track finished sequences
+            finished = finished | (next_word == eos_id)
+
+            if finished.all():
                 break
 
         return ys[:, 1:]

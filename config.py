@@ -16,21 +16,21 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    experiment_name: str = "v26"
+    experiment_name: str = "v27"
     aim_repo: str = "/home/mark/mt/.aim"
     batch_size: int = 32
     max_tokens_per_batch: int = 10000
     buffer_size: int = 150000
     num_workers: int = 6
-    lr: float = 5e-4
+    lr: float = 8.55e-4
     weight_decay: float = 0.01
     adam_eps: float = 1e-6
     label_smoothing: float = 0.1
     scheduler_type: str = "inv_sqrt"  # "inv_sqrt" or "cosine"
     epochs: int = 20
     grad_clip: float = 1.0
-    accum_steps: int = 12
-    warmup_steps: int = 5000
+    accum_steps: int = 15
+    warmup_steps: int = 10000
     max_steps: int = 200000
     eval_steps: int = 1000
     max_checkpoints: int = 4

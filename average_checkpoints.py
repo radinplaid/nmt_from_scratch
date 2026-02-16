@@ -1,8 +1,7 @@
 import torch
 import os
 import argparse
-from safetensors.torch import save_file
-from collections import OrderedDict
+from safetensors.torch import load_file, save_file
 
 
 def main():
@@ -26,15 +25,16 @@ def main():
     )
     args = parser.parse_args()
 
-    # 1. Find the last k checkpoints
+    # 1. Find the last k models
     if not os.path.exists(args.checkpoint_dir):
         print(f"Directory {args.checkpoint_dir} not found.")
         return
 
+    # Look for model_*.safetensors which contain the weights
     checkpoints = [
         f
         for f in os.listdir(args.checkpoint_dir)
-        if f.startswith("checkpoint_") and f.endswith(".pt")
+        if f.startswith("model_") and f.endswith(".safetensors")
     ]
 
     # Sort by step number
@@ -43,10 +43,10 @@ def main():
     selected = checkpoints[: args.k]
 
     if not selected:
-        print("No checkpoints found.")
+        print("No model files found.")
         return
 
-    print(f"Averaging {len(selected)} checkpoints:")
+    print(f"Averaging {len(selected)} model checkpoints:")
     for c in selected:
         print(f" - {c}")
 
@@ -56,14 +56,8 @@ def main():
 
     for i, ckpt_name in enumerate(selected):
         ckpt_path = os.path.join(args.checkpoint_dir, ckpt_name)
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
-        state_dict = checkpoint["model_state_dict"]
-
-        # Strip _orig_mod. prefix if present (from torch.compile)
-        clean_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            new_key = k.replace("_orig_mod.", "")
-            clean_state_dict[new_key] = v
+        # Load directly from safetensors
+        clean_state_dict = load_file(ckpt_path, device="cpu")
 
         if avg_state_dict is None:
             avg_state_dict = clean_state_dict

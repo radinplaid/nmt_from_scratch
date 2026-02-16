@@ -118,14 +118,12 @@ def main():
         num_layers=cfg.enc_layers,
         num_heads=cfg.n_heads,
         pre_norm=True,
-        no_final_norm=True,
         activation=ctranslate2.specs.Activation.GELU,
     )
     decoder_spec = ctranslate2.specs.TransformerDecoderSpec(
         num_layers=cfg.dec_layers,
         num_heads=cfg.n_heads,
         pre_norm=True,
-        no_final_norm=True,
         activation=ctranslate2.specs.Activation.GELU,
     )
 
@@ -166,6 +164,9 @@ def main():
         set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.linear2")
         set_layer_norm(layer_spec.ffn.layer_norm, state_dict, f"{prefix}.norm2")
 
+    # Final Encoder Norm
+    set_layer_norm(encoder_spec.layer_norm, state_dict, "encoder.norm")
+
     # 5. Decoder Layers
     for i in range(cfg.dec_layers):
         prefix = f"decoder.layers.{i}"
@@ -192,6 +193,9 @@ def main():
         set_linear(layer_spec.ffn.linear_0, state_dict, f"{prefix}.linear1")
         set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.linear2")
         set_layer_norm(layer_spec.ffn.layer_norm, state_dict, f"{prefix}.norm3")
+
+    # Final Decoder Norm
+    set_layer_norm(decoder_spec.layer_norm, state_dict, "decoder.norm")
 
     # 6. Save model
     if not os.path.exists(args.output_dir):

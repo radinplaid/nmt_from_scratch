@@ -239,10 +239,6 @@ def load_file_lines(path, limit=None):
 
 
 def PrepareData(config):
-    # Paths
-    src_train_path = config.train_config.source_path
-    tgt_train_path = config.train_config.target_path
-
     # 1. Train Tokenizers (if not exists)
     vocab_size = config.vocab_size
     model_prefix_src = "tokenizer_src"
@@ -250,11 +246,11 @@ def PrepareData(config):
 
     if not os.path.exists(f"{model_prefix_src}.model"):
         print("Training Source Tokenizer...")
-        train_tokenizer(src_train_path, model_prefix_src, vocab_size)
+        train_tokenizer(config.src_train_path, model_prefix_src, vocab_size)
 
     if not os.path.exists(f"{model_prefix_tgt}.model"):
         print("Training Target Tokenizer...")
-        train_tokenizer(tgt_train_path, model_prefix_tgt, vocab_size)
+        train_tokenizer(config.tgt_train_path, model_prefix_tgt, vocab_size)
 
     # 2. Load Tokenizers
     src_sp, tgt_sp = load_tokenizers(model_prefix_src, model_prefix_tgt)
