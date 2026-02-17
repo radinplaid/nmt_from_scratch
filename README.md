@@ -55,3 +55,19 @@ This is a start but there is still some work to be done:
 * The `train.py` script should be refactored to use a more modular design
 * ... etc
 
+
+## Usage
+
+```
+# Edit Config
+vim config.py
+
+# Train
+python train.py 
+
+# Average checkpoints
+python average_checkpoints.py --k 4 --checkpoint_dir checkpoints --output_prefix model_avg --export_int8 --calib_batches 500
+
+# Convert to CTranslate2 format
+python convert_to_ct2.py --model_path model_avg_int8.pt --output_dir ct2_model --quantization int8
+```

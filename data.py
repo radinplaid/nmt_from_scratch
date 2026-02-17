@@ -238,56 +238,56 @@ def load_file_lines(path, limit=None):
     return lines
 
 
-def PrepareData(config):
+def PrepareData(model_cfg, train_cfg):
     # 1. Train Tokenizers (if not exists)
-    vocab_size = config.vocab_size
+    vocab_size = model_cfg.vocab_size
     model_prefix_src = "tokenizer_src"
     model_prefix_tgt = "tokenizer_tgt"
 
     if not os.path.exists(f"{model_prefix_src}.model"):
         print("Training Source Tokenizer...")
-        train_tokenizer(config.src_train_path, model_prefix_src, vocab_size)
+        train_tokenizer(train_cfg.src_train_path, model_prefix_src, vocab_size)
 
     if not os.path.exists(f"{model_prefix_tgt}.model"):
         print("Training Target Tokenizer...")
-        train_tokenizer(config.tgt_train_path, model_prefix_tgt, vocab_size)
+        train_tokenizer(train_cfg.tgt_train_path, model_prefix_tgt, vocab_size)
 
     # 2. Load Tokenizers
     src_sp, tgt_sp = load_tokenizers(model_prefix_src, model_prefix_tgt)
 
     # 3. Create Streaming Datasets
     print("Initializing Streaming Datasets...")
-    max_tokens = getattr(config, "max_tokens_per_batch", 1024)
+    max_tokens = getattr(train_cfg, "max_tokens_per_batch", 1024)
 
     train_dataset = StreamingTextDataset(
-        config.src_train_path,
-        config.tgt_train_path,
+        train_cfg.src_train_path,
+        train_cfg.tgt_train_path,
         src_sp,
         tgt_sp,
         max_tokens,
-        buffer_size=config.buffer_size,
+        buffer_size=train_cfg.buffer_size,
     )
 
     dev_dataset = StreamingTextDataset(
-        config.src_dev_path,
-        config.tgt_dev_path,
+        train_cfg.src_dev_path,
+        train_cfg.tgt_dev_path,
         src_sp,
         tgt_sp,
         max_tokens,
-        buffer_size=config.buffer_size // 10,  # Smaller buffer for dev
+        buffer_size=train_cfg.buffer_size // 10,  # Smaller buffer for dev
     )
 
     # 4. Loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=None,
-        num_workers=config.num_workers,
+        num_workers=train_cfg.num_workers,
         pin_memory=True,
         prefetch_factor=8
-        if config.num_workers > 0
+        if train_cfg.num_workers > 0
         else None,  # Increase prefetch for higher throughput
-        persistent_workers=True if config.num_workers > 0 else False,
-        multiprocessing_context="spawn" if config.num_workers > 0 else None,
+        persistent_workers=True if train_cfg.num_workers > 0 else False,
+        multiprocessing_context="spawn" if train_cfg.num_workers > 0 else None,
     )
 
     # We use num_workers=0 for dev for simplicity/stability in metrics calculation

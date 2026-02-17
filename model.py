@@ -77,10 +77,6 @@ class Seq2SeqTransformer(nn.Module):
 
         self.generator = nn.Linear(config.d_model, config.vocab_size)
 
-        # Quantization stubs
-        self.quant = torch.ao.quantization.QuantStub()
-        self.dequant = torch.ao.quantization.DeQuantStub()
-
         # Initialize parameters
         for p in self.parameters():
             if p.dim() > 1:
@@ -88,9 +84,13 @@ class Seq2SeqTransformer(nn.Module):
 
     def encode(self, src, src_mask=None):
         src_emb = self.positional_encoding(self.src_tok_emb(src))
-        src_emb = self.quant(src_emb)
-        memory = self.encoder(src_emb, src_key_padding_mask=(src == 0))
-        return self.dequant(memory)
+        # Create padding mask: True where padding tokens (0) exist
+        src_padding_mask = (src == 0)
+        # Create a fresh boolean tensor to ensure correct dtype for quantized modules
+        # This prevents dtype conversion issues that occur during PTQ calibration
+        src_padding_mask = src_padding_mask.to(torch.bool)
+        memory = self.encoder(src_emb, src_key_padding_mask=src_padding_mask)
+        return memory
 
     def decode(
         self,
@@ -102,12 +102,6 @@ class Seq2SeqTransformer(nn.Module):
         memory_key_padding_mask=None,
     ):
         tgt_emb = self.positional_encoding(self.tgt_tok_emb(tgt))
-        tgt_emb = self.quant(tgt_emb)
-        # memory should already be dequantized from encode(), so we might need to quantize it again?
-        # Actually, in PyTorch QAT, submodules handle their own quantization.
-        # If memories are passed between encoded/decoded, we can either keep them quantized or dequantize.
-        # Standard practice is to dequantize at output of modules.
-        memory = self.quant(memory)
         out = self.decoder(
             tgt_emb,
             memory,
@@ -116,17 +110,19 @@ class Seq2SeqTransformer(nn.Module):
             tgt_key_padding_mask=tgt_key_padding_mask,
             memory_key_padding_mask=memory_key_padding_mask,
         )
-        return self.dequant(out)
+        return out
 
     def project(self, x):
-        return self.dequant(self.generator(self.quant(x)))
+        return self.generator(x)
 
     def forward(self, src, tgt, return_outputs=False, label_smoothing=0.0):
         # src: (batch, src_len)
         # tgt: (batch, tgt_len) - contains BOS and EOS
 
         # Create masks
-        src_padding_mask = src == 0  # (batch, src_len)
+        # Ensure masks are explicitly boolean for quantizable modules
+        # Create fresh boolean tensors to prevent dtype conversion issues during PTQ
+        src_padding_mask = (src == 0).to(torch.bool)
 
         # For training, we align input and target
         # Input to decoder: tgt[:, :-1] (BOS ... last_token)
@@ -135,13 +131,20 @@ class Seq2SeqTransformer(nn.Module):
         tgt_input = tgt[:, :-1]
         tgt_out = tgt[:, 1:]
 
-        tgt_padding_mask = tgt_input == 0  # (batch, tgt_len-1)
+        tgt_padding_mask = (tgt_input == 0).to(torch.bool)
 
         # Causal mask for decoder autogression
         tgt_len = tgt_input.size(1)
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len).to(
             src.device
         )
+        # Ensure tgt_mask is boolean for quantizable modules
+        # Note: For MultiheadAttention, a float mask is added to attn weights,
+        # but a bool mask is used for masked_fill.
+        # nn.Transformer.generate_square_subsequent_mask returns float (-inf/0).
+        # We convert it to bool (True for mask, False for keep)
+        if tgt_mask.dtype != torch.bool:
+            tgt_mask = (tgt_mask < 0)
 
         # 1. Encode
         memory = self.encode(src)
@@ -179,7 +182,9 @@ class Seq2SeqTransformer(nn.Module):
 
     @torch.no_grad()
     def generate(self, src, max_len=256, bos_id=2, eos_id=3, enc_output=None):
-        src_padding_mask = src == 0
+        # Ensure mask is explicitly boolean for quantizable modules
+        # Create fresh boolean tensor to prevent dtype conversion issues during PTQ
+        src_padding_mask = (src == 0).to(torch.bool)
         bs = src.size(0)
         device = src.device
 
@@ -232,7 +237,9 @@ class Seq2SeqTransformer(nn.Module):
         # But standard beam search implementation usually keeps batch dimension separate until usually not efficient.
         # Let's do simple batched beam search where we flatten bs*beam
 
-        src_padding_mask = src == 0
+        # Ensure mask is explicitly boolean for quantizable modules
+        # Create fresh boolean tensor to prevent dtype conversion issues during PTQ
+        src_padding_mask = (src == 0).to(torch.bool)
 
         # Tile memory and mask
         # memory: (bs, seq, dim) -> (bs*beam, seq, dim)
@@ -331,52 +338,10 @@ class Seq2SeqTransformer(nn.Module):
         # inputs: (bs, beam, seq) -> return (bs, seq) of best beam (index 0)
         return inputs[:, 0, 1:]  # Skip BOS
 
-    def prepare_for_qat(self, backend="fbgemm"):
-        """
-        Prepare the model for Quantization Aware Training.
-        """
-        self.train()
-
-        # Workaround for a PyTorch bug where NonDynamicallyQuantizableLinear
-        # (used in nn.MultiheadAttention) causes an assertion error in QAT.
-        # We replace them with standard nn.Linear.
-        for name, module in self.named_modules():
-            if "NonDynamicallyQuantizableLinear" in str(type(module)):
-                # Get the parent module and the attribute name
-                parts = name.split(".")
-                parent = self
-                for part in parts[:-1]:
-                    parent = getattr(parent, part)
-                attr_name = parts[-1]
-
-                # Replace with standard Linear
-                new_linear = nn.Linear(
-                    module.in_features,
-                    module.out_features,
-                    bias=module.bias is not None,
-                )
-                new_linear.load_state_dict(module.state_dict())
-                setattr(parent, attr_name, new_linear)
-                print(f"Replaced {name} with standard nn.Linear for QAT compatibility")
-
-        # Set quantization configuration
-        if backend == "fbgemm":
-            # For x86
-            self.qconfig = torch.ao.quantization.get_default_qat_qconfig("fbgemm")
-        else:
-            # For ARM/mobile
-            self.qconfig = torch.ao.quantization.get_default_qat_qconfig("qnnpack")
-
-        # Fuse modules if possible (Linear + ReLU/GELU)
-        # Note: nn.Transformer components are complex to fuse manually in Eager mode
-        # but we can try to fuse the generator if it had an activation.
-        # Here we just prepare the whole model.
-        torch.ao.quantization.prepare_qat(self, inplace=True)
-        print(f"Model prepared for QAT using {backend} backend")
-
     def convert_to_int8(self):
         """
-        Convert the QAT-trained model to a quantized INT8 model.
+        Convert the PTQ-calibrated model to a quantized INT8 model.
+        This should be called after calibrate().
         """
         self.eval()
         torch.ao.quantization.convert(self, inplace=True)
@@ -390,7 +355,7 @@ class Seq2SeqTransformer(nn.Module):
         device = next(self.parameters()).device
         self.train()
         # Ensure observers are enabled but weights are not updated via gradients
-        # PyTorch QAT modules handle this internally when in .train() but with no_grad()
+        # PyTorch quantization modules handle this internally when in .train() but with no_grad()
         with torch.no_grad():
             for i, (src, tgt) in enumerate(loader):
                 if i >= num_batches:

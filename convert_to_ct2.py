@@ -19,10 +19,31 @@ def get_layer_weights(state_dict, prefix):
     """Extract weights and biases for a layer with a given prefix."""
     weights = state_dict.get(f"{prefix}.weight")
     bias = state_dict.get(f"{prefix}.bias")
+
+    # Handle quantized linear layers
+    if weights is None and f"{prefix}._packed_params._packed_params" in state_dict:
+        packed_params = state_dict.get(f"{prefix}._packed_params._packed_params")
+        if isinstance(packed_params, tuple) and len(packed_params) >= 2:
+            qweight, bias = packed_params
+            if hasattr(qweight, "dequantize"):
+                weights = qweight.dequantize()
+            else:
+                weights = qweight
+
     if weights is not None:
-        weights = weights.numpy()
+        if hasattr(weights, "detach"):
+            weights = weights.detach().cpu().numpy()
+        elif hasattr(weights, "numpy"):
+            weights = weights.numpy()
+        else:
+            weights = np.array(weights)
     if bias is not None:
-        bias = bias.numpy()
+        if hasattr(bias, "detach"):
+            bias = bias.detach().cpu().numpy()
+        elif hasattr(bias, "numpy"):
+            bias = bias.numpy()
+        else:
+            bias = np.array(bias)
     return weights, bias
 
 
@@ -33,8 +54,23 @@ def set_linear(spec, state_dict, prefix):
 
 def set_layer_norm(spec, state_dict, prefix):
     """Set gamma and beta for a CT2 LayerNormSpec."""
-    spec.gamma = state_dict.get(f"{prefix}.weight").numpy()
-    spec.beta = state_dict.get(f"{prefix}.bias").numpy()
+    weight = state_dict.get(f"{prefix}.weight")
+    bias = state_dict.get(f"{prefix}.bias")
+
+    if weight is None:
+        # Fallback for quantized LayerNorm which might use 'scale' instead of 'weight'
+        weight = state_dict.get(f"{prefix}.scale")
+
+    if weight is not None:
+        if hasattr(weight, "detach"):
+            spec.gamma = weight.detach().cpu().numpy()
+        else:
+            spec.gamma = weight.numpy()
+    if bias is not None:
+        if hasattr(bias, "detach"):
+            spec.beta = bias.detach().cpu().numpy()
+        else:
+            spec.beta = bias.numpy()
 
 
 def _make_sinusoidal_position_encodings(max_len, d_model):
@@ -49,16 +85,43 @@ def _make_sinusoidal_position_encodings(max_len, d_model):
 
 def set_multihead_attention(spec, state_dict, prefix, self_attention=True):
     """Set weights for a CT2 MultiHeadAttentionSpec from PyTorch MultiheadAttention."""
-    in_proj_weight = state_dict.get(f"{prefix}.in_proj_weight").numpy()
-    in_proj_bias = state_dict.get(f"{prefix}.in_proj_bias").numpy()
+    in_proj_weight = state_dict.get(f"{prefix}.in_proj_weight")
+    in_proj_bias = state_dict.get(f"{prefix}.in_proj_bias")
+    out_proj_weight = state_dict.get(f"{prefix}.out_proj.weight")
+    out_proj_bias = state_dict.get(f"{prefix}.out_proj.bias")
+
+    if in_proj_weight is not None:
+        in_proj_weight = (
+            in_proj_weight.detach().cpu().numpy()
+            if hasattr(in_proj_weight, "detach")
+            else in_proj_weight.numpy()
+        )
+    if in_proj_bias is not None:
+        in_proj_bias = (
+            in_proj_bias.detach().cpu().numpy()
+            if hasattr(in_proj_bias, "detach")
+            else in_proj_bias.numpy()
+        )
+    if out_proj_weight is not None:
+        out_proj_weight = (
+            out_proj_weight.detach().cpu().numpy()
+            if hasattr(out_proj_weight, "detach")
+            else out_proj_weight.numpy()
+        )
+    if out_proj_bias is not None:
+        out_proj_bias = (
+            out_proj_bias.detach().cpu().numpy()
+            if hasattr(out_proj_bias, "detach")
+            else out_proj_bias.numpy()
+        )
 
     if self_attention:
         # linear[0] is in_proj
         spec.linear[0].weight = in_proj_weight
         spec.linear[0].bias = in_proj_bias
         # linear[1] is out_proj
-        spec.linear[1].weight = state_dict.get(f"{prefix}.out_proj.weight").numpy()
-        spec.linear[1].bias = state_dict.get(f"{prefix}.out_proj.bias").numpy()
+        spec.linear[1].weight = out_proj_weight
+        spec.linear[1].bias = out_proj_bias
     else:
         # linear[0] is query_proj
         # linear[1] is kv_proj (fused)
@@ -72,8 +135,8 @@ def set_multihead_attention(spec, state_dict, prefix, self_attention=True):
         spec.linear[1].weight = np.concatenate([k, v], axis=0)
         spec.linear[1].bias = np.concatenate([kb, vb], axis=0)
 
-        spec.linear[2].weight = state_dict.get(f"{prefix}.out_proj.weight").numpy()
-        spec.linear[2].bias = state_dict.get(f"{prefix}.out_proj.bias").numpy()
+        spec.linear[2].weight = out_proj_weight
+        spec.linear[2].bias = out_proj_bias
 
 
 def convert_vocab(sp_vocab_path):
@@ -145,17 +208,32 @@ def main():
     # 3. Map weights
 
     # Embeddings
-    encoder_spec.embeddings[0].weight = state_dict.get(
-        "src_tok_emb.embedding.weight"
-    ).numpy()
-    decoder_spec.embeddings.weight = state_dict.get(
-        "tgt_tok_emb.embedding.weight"
-    ).numpy()
+    src_emb = state_dict.get("src_tok_emb.embedding.weight")
+    if src_emb is not None:
+        encoder_spec.embeddings[0].weight = (
+            src_emb.detach().cpu().numpy()
+            if hasattr(src_emb, "detach")
+            else src_emb.numpy()
+        )
+
+    tgt_emb = state_dict.get("tgt_tok_emb.embedding.weight")
+    if tgt_emb is not None:
+        decoder_spec.embeddings.weight = (
+            tgt_emb.detach().cpu().numpy()
+            if hasattr(tgt_emb, "detach")
+            else tgt_emb.numpy()
+        )
 
     # Position Encodings
-    pe = state_dict.get("positional_encoding.pe")[0].numpy()
-    encoder_spec.position_encodings.encodings = pe
-    decoder_spec.position_encodings.encodings = pe
+    pe_tensor = state_dict.get("positional_encoding.pe")
+    if pe_tensor is not None:
+        pe = (
+            pe_tensor[0].detach().cpu().numpy()
+            if hasattr(pe_tensor, "detach")
+            else pe_tensor[0].numpy()
+        )
+        encoder_spec.position_encodings.encodings = pe
+        decoder_spec.position_encodings.encodings = pe
 
     # Generator (Projection)
     set_linear(decoder_spec.projection, state_dict, "generator")

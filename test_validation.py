@@ -78,7 +78,8 @@ def test_validation():
     with torch.no_grad():
         # Encode source
         # src_mask not needed explicitly if we use model.encode which handles it
-        src_padding_mask = src == 0
+        # Ensure mask is explicitly boolean for quantizable modules
+        src_padding_mask = (src == 0).to(torch.bool)
         enc = model.encode(src)
 
         # Get target without BOS

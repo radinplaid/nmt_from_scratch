@@ -16,27 +16,25 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    experiment_name: str = "v28"
+    experiment_name: str = "v30"
     aim_repo: str = "/home/mark/mt/.aim"
     batch_size: int = 32
     max_tokens_per_batch: int = 10000
     buffer_size: int = 150000
-    num_workers: int = 6
-    lr: float = 4e-4
+    num_workers: int = 4
+    lr: float = 8.5e-4
     weight_decay: float = 0.01
     adam_eps: float = 1e-6
     label_smoothing: float = 0.1
     scheduler_type: str = "inv_sqrt"  # "inv_sqrt" or "cosine"
     epochs: int = 20
     grad_clip: float = 1.0
-    accum_steps: int = 3
-    warmup_steps: int = 10000
+    accum_steps: int = 12
+    warmup_steps: int = 8000
     max_steps: int = 20000
     eval_steps: int = 1000
     max_checkpoints: int = 4
     checkpoint_dir: str = "checkpoints"
-    use_qat: bool = True
-    qat_start_step: int = 10000
 
     # Data params
     src_lang: str = "fa"
@@ -47,30 +45,3 @@ class TrainConfig:
     tgt_dev_path: str = "data/dev.en"
 
 
-@dataclass
-class DataConfig:
-    vocab_size: int
-    max_len: int
-    batch_size: int
-    max_tokens_per_batch: int
-    src_train_path: str
-    tgt_train_path: str
-    src_dev_path: str
-    tgt_dev_path: str
-    buffer_size: int
-    num_workers: int
-
-    @classmethod
-    def from_configs(cls, model_cfg: ModelConfig, train_cfg: TrainConfig):
-        return cls(
-            vocab_size=model_cfg.vocab_size,
-            max_len=model_cfg.max_len,
-            batch_size=train_cfg.batch_size,
-            max_tokens_per_batch=train_cfg.max_tokens_per_batch,
-            src_train_path=train_cfg.src_train_path,
-            tgt_train_path=train_cfg.tgt_train_path,
-            src_dev_path=train_cfg.src_dev_path,
-            tgt_dev_path=train_cfg.tgt_dev_path,
-            buffer_size=train_cfg.buffer_size,
-            num_workers=train_cfg.num_workers,
-        )

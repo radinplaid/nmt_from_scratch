@@ -2,7 +2,7 @@ import torch
 import os
 import argparse
 from safetensors.torch import load_file, save_file
-from config import ModelConfig, TrainConfig, DataConfig
+from config import ModelConfig, TrainConfig
 from model import Seq2SeqTransformer
 from data import PrepareData
 
@@ -34,7 +34,7 @@ def main():
     parser.add_argument(
         "--calib_batches",
         type=int,
-        default=50,
+        default=500,
         help="Number of batches for calibration",
     )
     args = parser.parse_args()
@@ -78,7 +78,7 @@ def main():
                 if k in avg_state_dict:
                     avg_state_dict[k] += clean_state_dict[k]
                 else:
-                    # This might happen if mixing different architectures or QAT/non-QAT
+                    # This might happen if mixing different architectures
                     print(f"Warning: Key {k} not found in first checkpoint. Skipping.")
 
     # Divide by count
@@ -107,37 +107,34 @@ def main():
         model_cfg = ModelConfig()
         train_cfg = TrainConfig()
 
-        data_cfg = DataConfig.from_configs(model_cfg, train_cfg)
-        data_cfg.batch_size = 8
-        data_cfg.max_tokens_per_batch = 2048
-        data_cfg.buffer_size = 10000
-        data_cfg.num_workers = 0
-        _, dev_loader, _, _ = PrepareData(data_cfg)
+        # Override settings for calibration
+        train_cfg.batch_size = 8
+        train_cfg.max_tokens_per_batch = 2048
+        train_cfg.buffer_size = 10000
+        train_cfg.num_workers = 0
+        _, dev_loader, _, _ = PrepareData(model_cfg, train_cfg)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = "cpu"
         model = Seq2SeqTransformer(model_cfg).to(device)
 
-        # Check if we should prepare for QAT
-        # We assume if the user wants INT8 export and we have averaged checkpoints,
-        # those checkpoints might be QAT, or we want to do PTQ.
-        # Let's check if avg_state_dict has 'fake_quant' keys
-        is_qat = any("fake_quant" in k for k in avg_state_dict.keys())
-
-        if is_qat:
-            print(
-                "Detected QAT buffers. Preparing model for QAT before loading weights."
-            )
-            model.prepare_for_qat()
-        else:
-            print(
-                "No QAT buffers detected. Performing Post-Training Quantization (PTQ) calibration."
-            )
-            # For PTQ, we still need to prepare the model with observers
-            # We can use the same prepare_for_qat but we won't train weights.
-            model.prepare_for_qat()
-
-        # Load averaged weights
+        # Load averaged weights BEFORE preparing for quantization
+        print("Loading averaged weights...")
         model.load_state_dict(avg_state_dict)
+
+        # Prepare model for Post-Training Quantization (PTQ)
+        print("Preparing model for Post-Training Quantization (PTQ)...")
+        # Set quantization config
+        model.qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
+        
+        # Disable quantization for MultiheadAttention to avoid masked_fill dtype bug
+        # Also disable for Embedding as it requires special qconfig
+        for name, module in model.named_modules():
+            if any(k in name for k in ["self_attn", "multihead_attn", "emb"]):
+                module.qconfig = None
+
+        # Prepare the model (inserts observers)
+        torch.ao.quantization.prepare(model, inplace=True)
 
         # Calibrate
         model.calibrate(dev_loader, num_batches=args.calib_batches)
