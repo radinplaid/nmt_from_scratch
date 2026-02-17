@@ -30,9 +30,9 @@ class TrainConfig:
     epochs: int = 20
     grad_clip: float = 1.0
     accum_steps: int = 12
-    warmup_steps: int = 8000
-    max_steps: int = 20000
-    eval_steps: int = 1000
+    warmup_steps: int = 5000
+    max_steps: int = 100000
+    eval_steps: int = 2500
     max_checkpoints: int = 4
     checkpoint_dir: str = "checkpoints"
 

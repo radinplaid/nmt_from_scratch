@@ -211,8 +211,9 @@ class Seq2SeqTransformer(nn.Module):
             _, next_word = torch.max(prob, dim=1)
 
             # Only update sequences that haven't finished
-            # If a sequence finished, we append PAD (0) or EOS (3)
-            # Here we just append the prediction, and we'll mask later or just accept it's "finished"
+            # For finished sequences, append PAD (0) instead of the predicted token
+            next_word = next_word.clone()
+            next_word[finished] = 0  # Append PAD for finished sequences
             ys = torch.cat([ys, next_word.unsqueeze(1)], dim=1)
 
             # Track finished sequences

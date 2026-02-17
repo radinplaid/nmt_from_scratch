@@ -219,7 +219,14 @@ def train():
                     for i in range(src.size(0)):
                         if sample_count >= max_samples:
                             break
-                        hyp = tgt_sp.decode(generated_ids[i].tolist())
+                        # Post-process: stop at EOS (3) or PAD (0) tokens
+                        ids = generated_ids[i].tolist()
+                        # Find first EOS or PAD token and truncate
+                        for idx, token_id in enumerate(ids):
+                            if token_id == 3 or token_id == 0:  # eos_id or pad_id
+                                ids = ids[:idx]
+                                break
+                        hyp = tgt_sp.decode(ids)
                         ref = tgt_sp.decode(tgt[i].tolist())
                         hypotheses.append(hyp)
                         references.append(ref)
@@ -376,8 +383,11 @@ def train():
                 # Helper to remove padding and decode
                 def cleanup_and_decode(ids_tensor, sp):
                     ids = ids_tensor[0].tolist()
-                    # Remove padding (0)
-                    ids = [idx for idx in ids if idx != 0]
+                    # Stop at EOS (3) or PAD (0) tokens
+                    for idx, token_id in enumerate(ids):
+                        if token_id == 3 or token_id == 0:  # eos_id or pad_id
+                            ids = ids[:idx]
+                            break
                     return sp.decode(ids)
 
                 s_text = cleanup_and_decode(s_tensor, src_sp)

@@ -283,7 +283,7 @@ def PrepareData(model_cfg, train_cfg):
         batch_size=None,
         num_workers=train_cfg.num_workers,
         pin_memory=True,
-        prefetch_factor=8
+        prefetch_factor=64
         if train_cfg.num_workers > 0
         else None,  # Increase prefetch for higher throughput
         persistent_workers=True if train_cfg.num_workers > 0 else False,
