@@ -17,7 +17,7 @@ class ModelConfig:
 @dataclass
 class TrainConfig:
     experiment_name: str = "v30"
-    aim_repo: str = "/home/mark/mt/.aim"
+    aim_repo: str = "~/mt/.aim"
     batch_size: int = 32
     max_tokens_per_batch: int = 10000
     buffer_size: int = 150000
