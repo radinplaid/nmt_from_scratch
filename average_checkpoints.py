@@ -34,7 +34,7 @@ def main():
     parser.add_argument(
         "--calib_batches",
         type=int,
-        default=500,
+        default=200,
         help="Number of batches for calibration",
     )
     args = parser.parse_args()
@@ -64,14 +64,14 @@ def main():
         print(f" - {c}")
 
     # 2. Load and average state dicts
-    avg_state_dict = None
+    avg_state_dict: dict[str, torch.Tensor] = {}
     count = len(selected)
 
     for i, ckpt_name in enumerate(selected):
         ckpt_path = os.path.join(args.checkpoint_dir, ckpt_name)
         clean_state_dict = load_file(ckpt_path, device="cpu")
 
-        if avg_state_dict is None:
+        if not avg_state_dict:
             avg_state_dict = clean_state_dict
         else:
             for k in clean_state_dict:
@@ -127,11 +127,11 @@ def main():
         # Set quantization config
         model.qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
         
-        # Disable quantization for MultiheadAttention to avoid masked_fill dtype bug
-        # Also disable for Embedding as it requires special qconfig
+        # Disable quantization for Embedding as it requires special qconfig (e.g. float16 or quint8)
+        # MultiheadAttention is now kept enabled as we've ensured boolean masks in model.py
         for name, module in model.named_modules():
             if any(k in name for k in ["self_attn", "multihead_attn", "emb"]):
-                module.qconfig = None
+                module.qconfig = None  # type: ignore
 
         # Prepare the model (inserts observers)
         torch.ao.quantization.prepare(model, inplace=True)

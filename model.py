@@ -85,11 +85,17 @@ class Seq2SeqTransformer(nn.Module):
     def encode(self, src, src_mask=None):
         src_emb = self.positional_encoding(self.src_tok_emb(src))
         # Create padding mask: True where padding tokens (0) exist
-        src_padding_mask = (src == 0)
-        # Create a fresh boolean tensor to ensure correct dtype for quantized modules
-        # This prevents dtype conversion issues that occur during PTQ calibration
-        src_padding_mask = src_padding_mask.to(torch.bool)
-        memory = self.encoder(src_emb, src_key_padding_mask=src_padding_mask)
+        src_padding_mask = (src == 0).to(torch.bool)
+        
+        # If src_mask is provided (e.g. for specific attention patterns), ensure it's bool
+        if src_mask is not None and src_mask.dtype != torch.bool:
+            src_mask = (src_mask < 0) if src_mask.is_floating_point() else src_mask.to(torch.bool)
+
+        # Ensure the encoder itself uses boolean masks internally
+        # This is a workaround for quantizable MultiheadAttention
+        memory = self.encoder(
+            src_emb, mask=src_mask, src_key_padding_mask=src_padding_mask
+        )
         return memory
 
     def decode(
@@ -102,6 +108,17 @@ class Seq2SeqTransformer(nn.Module):
         memory_key_padding_mask=None,
     ):
         tgt_emb = self.positional_encoding(self.tgt_tok_emb(tgt))
+
+        # Ensure all masks are boolean for quantizable MultiheadAttention
+        if tgt_mask is not None and tgt_mask.dtype != torch.bool:
+            tgt_mask = (tgt_mask < 0) if tgt_mask.is_floating_point() else tgt_mask.to(torch.bool)
+        if memory_mask is not None and memory_mask.dtype != torch.bool:
+            memory_mask = (memory_mask < 0) if memory_mask.is_floating_point() else memory_mask.to(torch.bool)
+        if tgt_key_padding_mask is not None and tgt_key_padding_mask.dtype != torch.bool:
+            tgt_key_padding_mask = tgt_key_padding_mask.to(torch.bool)
+        if memory_key_padding_mask is not None and memory_key_padding_mask.dtype != torch.bool:
+            memory_key_padding_mask = memory_key_padding_mask.to(torch.bool)
+
         out = self.decoder(
             tgt_emb,
             memory,
@@ -147,9 +164,11 @@ class Seq2SeqTransformer(nn.Module):
             tgt_mask = (tgt_mask < 0)
 
         # 1. Encode
+        # Ensure src_padding_mask is passed correctly and is boolean
         memory = self.encode(src)
 
         # 2. Decode
+        # Masks are converted to bool inside self.decode()
         outs = self.decode(
             tgt_input,
             memory,
@@ -202,6 +221,7 @@ class Seq2SeqTransformer(nn.Module):
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(ys.size(1)).to(
                 device
             )
+            # tgt_mask is converted to bool inside self.decode()
             out = self.decode(
                 ys, memory, tgt_mask=tgt_mask, memory_key_padding_mask=src_padding_mask
             )
@@ -275,6 +295,7 @@ class Seq2SeqTransformer(nn.Module):
 
             # Decode
             # out: (bs*beam, seq, dim)
+            # tgt_mask is converted to bool inside self.decode()
             out = self.decode(
                 flat_inputs,
                 memory,
