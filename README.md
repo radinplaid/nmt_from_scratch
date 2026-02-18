@@ -42,6 +42,7 @@ Experimenting with training Neural Machine Translation (NMT) models from scratch
 - sacrebleu
 - aim
 - ctranslate2
+- quickmt
 
 
 ## TODO
@@ -65,11 +66,12 @@ vim config.py
 # Train
 python train.py 
 
-# Average checkpoints
-python average_checkpoints.py --k 4 --checkpoint_dir checkpoints --output_prefix model_avg --export_int8 --calib_batches 500
+# Average checkpoints and quantize the model
+python average_checkpoints.py --k 4 --checkpoint_dir checkpoints --output_prefix model_avg --export_int8 --calib_batches 200
 
 # Convert to CTranslate2 format
 python convert_to_ct2.py --model_path model_avg_int8.pt --output_dir ct2_model --quantization int8
 
-# The resulting folder can be used with `quickmt` for inference - https://github.com/quickmt/quickmt
+# Evaluate (uses quickmt library, https://github.com/quickmt/quickmt)
+python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cuda --batch_size 16 --beam_size 5 --model ./ct2_model
 ```
