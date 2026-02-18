@@ -50,17 +50,15 @@ Experimenting with training Neural Machine Translation (NMT) models from scratch
 This is a start but there is still some work to be done:
 
 * Validation metrics do not seem to be calculated correctly
-* The `generate` method in `model.py` does not seem to be implemented correctly, although the beam search seems to work fine
-* The loss scaling in the training loop should be scaled by the number of tokens in the batch, not the number of batches
+* The `generate` and `beam_search` methods in `model.py` does not seem to be implemented correctly
 * Lots of things are hard-coded and should be configurable
-* The `train.py` script should be refactored to use a more modular design
 * ... etc
 
 
 ## Usage
 
 ```
-# Edit Config
+# Edit config to your liking
 vim config.py
 
 # Train
