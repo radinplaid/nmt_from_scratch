@@ -71,9 +71,31 @@ def main():
         name = k.replace("_orig_mod.", "")
         new_state_dict[name] = v
 
-    model.load_state_dict(new_state_dict)
+    try:
+        model.load_state_dict(new_state_dict)
+        is_quantized = False
+    except RuntimeError:
+        print("Standard loading failed. Attempting to load as quantized INT8 model...")
+        # Re-apply the same quantization preparation as in average_checkpoints.py
+        model.qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
+        for name, module in model.named_modules():
+            if any(k in name for k in ["self_attn", "multihead_attn", "emb"]):
+                module.qconfig = None
+        
+        torch.ao.quantization.prepare(model, inplace=True)
+        torch.ao.quantization.convert(model, inplace=True)
+        model.load_state_dict(new_state_dict)
+        is_quantized = True
+        print("Successfully loaded quantized INT8 model.")
+
     model.eval()
-    model = torch.compile(model)
+    if not is_quantized:
+        try:
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"torch.compile failed: {e}. Continuing without compilation.")
+    else:
+        print("Skipping torch.compile for quantized model.")
 
     # Load tokenizers
     src_sp = spm.SentencePieceProcessor(model_file=args.src_sp)

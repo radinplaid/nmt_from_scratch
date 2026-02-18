@@ -375,9 +375,8 @@ class Seq2SeqTransformer(nn.Module):
         This is useful after averaging weights.
         """
         device = next(self.parameters()).device
-        self.train()
-        # Ensure observers are enabled but weights are not updated via gradients
-        # PyTorch quantization modules handle this internally when in .train() but with no_grad()
+        self.eval()
+        # Ensure observers are enabled and Dropout is disabled
         with torch.no_grad():
             for i, (src, tgt) in enumerate(loader):
                 if i >= num_batches:

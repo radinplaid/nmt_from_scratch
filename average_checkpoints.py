@@ -102,6 +102,8 @@ def main():
     print(f"Saved averaged model to {pt_output} and {st_output}")
 
     # 4. Calibration and INT8 Export
+    # The calibration seems to help a very slight amount compared to int8 quantization with ctranslate2
+    # It also enables smaller pt/safetensors model files
     if args.export_int8:
         print("\nStarting re-calibration for INT8 export...")
         model_cfg = ModelConfig()
@@ -114,19 +116,20 @@ def main():
         train_cfg.num_workers = 0
         _, dev_loader, _, _ = PrepareData(model_cfg, train_cfg)
 
-        #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         device = "cpu"
         model = Seq2SeqTransformer(model_cfg).to(device)
 
         # Load averaged weights BEFORE preparing for quantization
         print("Loading averaged weights...")
         model.load_state_dict(avg_state_dict)
+        model.eval()
 
         # Prepare model for Post-Training Quantization (PTQ)
         print("Preparing model for Post-Training Quantization (PTQ)...")
         # Set quantization config
         model.qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
-        
+
         # Disable quantization for Embedding as it requires special qconfig (e.g. float16 or quint8)
         # MultiheadAttention is now kept enabled as we've ensured boolean masks in model.py
         for name, module in model.named_modules():
@@ -142,7 +145,7 @@ def main():
         # Convert and Save
         model.convert_to_int8()
         int8_output = f"{args.output_prefix}_int8.pt"
-        torch.save(model.state_dict(), int8_output)
+        torch.save({"model_state_dict": model.state_dict()}, int8_output)
         print(f"Saved calibrated INT8 model to {int8_output}")
 
 
