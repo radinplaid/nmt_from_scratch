@@ -70,4 +70,6 @@ python average_checkpoints.py --k 4 --checkpoint_dir checkpoints --output_prefix
 
 # Convert to CTranslate2 format
 python convert_to_ct2.py --model_path model_avg_int8.pt --output_dir ct2_model --quantization int8
+
+# The resulting folder can be used with `quickmt` for inference - https://github.com/quickmt/quickmt
 ```
