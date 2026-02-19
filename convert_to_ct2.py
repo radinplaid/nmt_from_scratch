@@ -27,14 +27,14 @@ def get_layer_weights(state_dict, prefix):
 
     if weights is not None:
         if hasattr(weights, "detach"):
-            weights = weights.detach().cpu().numpy()
+            weights = weights.detach().float().cpu().numpy()
         elif hasattr(weights, "numpy"):
             weights = weights.numpy()
         else:
             weights = np.array(weights)
     if bias is not None:
         if hasattr(bias, "detach"):
-            bias = bias.detach().cpu().numpy()
+            bias = bias.detach().float().cpu().numpy()
         elif hasattr(bias, "numpy"):
             bias = bias.numpy()
         else:
@@ -58,12 +58,12 @@ def set_layer_norm(spec, state_dict, prefix):
 
     if weight is not None:
         if hasattr(weight, "detach"):
-            spec.gamma = weight.detach().cpu().numpy()
+            spec.gamma = weight.detach().float().cpu().numpy()
         else:
             spec.gamma = weight.numpy()
     if bias is not None:
         if hasattr(bias, "detach"):
-            spec.beta = bias.detach().cpu().numpy()
+            spec.beta = bias.detach().float().cpu().numpy()
         else:
             spec.beta = bias.numpy()
 
@@ -87,25 +87,25 @@ def set_multihead_attention(spec, state_dict, prefix, self_attention=True):
 
     if in_proj_weight is not None:
         in_proj_weight = (
-            in_proj_weight.detach().cpu().numpy()
+            in_proj_weight.detach().float().cpu().numpy()
             if hasattr(in_proj_weight, "detach")
             else in_proj_weight.numpy()
         )
     if in_proj_bias is not None:
         in_proj_bias = (
-            in_proj_bias.detach().cpu().numpy()
+            in_proj_bias.detach().float().cpu().numpy()
             if hasattr(in_proj_bias, "detach")
             else in_proj_bias.numpy()
         )
     if out_proj_weight is not None:
         out_proj_weight = (
-            out_proj_weight.detach().cpu().numpy()
+            out_proj_weight.detach().float().cpu().numpy()
             if hasattr(out_proj_weight, "detach")
             else out_proj_weight.numpy()
         )
     if out_proj_bias is not None:
         out_proj_bias = (
-            out_proj_bias.detach().cpu().numpy()
+            out_proj_bias.detach().float().cpu().numpy()
             if hasattr(out_proj_bias, "detach")
             else out_proj_bias.numpy()
         )
@@ -189,7 +189,7 @@ def main():
     src_emb = state_dict.get("src_tok_emb.embedding.weight")
     if src_emb is not None:
         encoder_spec.embeddings[0].weight = (
-            src_emb.detach().cpu().numpy()
+            src_emb.detach().float().cpu().numpy()
             if hasattr(src_emb, "detach")
             else src_emb.numpy()
         )
@@ -197,7 +197,7 @@ def main():
     tgt_emb = state_dict.get("tgt_tok_emb.embedding.weight")
     if tgt_emb is not None:
         decoder_spec.embeddings.weight = (
-            tgt_emb.detach().cpu().numpy()
+            tgt_emb.detach().float().cpu().numpy()
             if hasattr(tgt_emb, "detach")
             else tgt_emb.numpy()
         )
@@ -206,7 +206,7 @@ def main():
     pe_tensor = state_dict.get("positional_encoding.pe")
     if pe_tensor is not None:
         pe = (
-            pe_tensor[0].detach().cpu().numpy()
+            pe_tensor[0].detach().float().cpu().numpy()
             if hasattr(pe_tensor, "detach")
             else pe_tensor[0].numpy()
         )

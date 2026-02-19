@@ -25,7 +25,7 @@ train:
   eval_steps: 2500
   max_checkpoints: 4
 export:
-  k: 1
+  k: 4
   output_prefix: "faen-tiny/averaged_model"
   export_int8: true
   calib_batches: 200

@@ -21,17 +21,15 @@ train:
   lr: 8.5e-4
   accum_steps: 12
   warmup_steps: 5000
-  max_steps: 100000
+  max_steps: 200000
   eval_steps: 2500
   max_checkpoints: 4
 
-averaging:
-  k: 4
+export:
+  model_path: "faen-small/averaged_model.pt"
+  output_dir: "faen-small/ct2_model"
+  quantization: "int8"
+  k: 3
   output_prefix: "faen-small/averaged_model"
   export_int8: true
   calib_batches: 200
-
-ct2:
-  model_path: "faen-small/averaged_model.safetensors"
-  output_dir: "faen-small/ct2_model"
-  quantization: "int8"
