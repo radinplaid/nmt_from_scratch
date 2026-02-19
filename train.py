@@ -449,6 +449,10 @@ if __name__ == "__main__":
     model_cfg = None
     train_cfg = None
     if args.config:
-        model_cfg, train_cfg, _, _ = load_config(args.config)
+        model_cfg, train_cfg, _ = load_config(args.config)
+
+    print(model_cfg)
+
+    print(train_cfg)
 
     train(model_cfg, train_cfg)

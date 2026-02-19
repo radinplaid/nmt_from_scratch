@@ -42,6 +42,7 @@ class TrainConfig:
     tgt_train_path: str = "data/train.en"
     src_dev_path: str = "data/dev.fa"
     tgt_dev_path: str = "data/dev.en"
+    checkpoint_dir: str = None # type: ignore[assignment]
 
     def __post_init__(self):
         # Dynamically generate checkpoint_dir from experiment_name if not provided
@@ -59,6 +60,7 @@ class ExportConfig:
     src_vocab: str = "tokenizer_src.vocab"
     tgt_vocab: str = "tokenizer_tgt.vocab"
     quantization: str = "int8"
+    output_prefix: str = None # type: ignore[assignment]
 
     def __post_init__(self):
         # Dynamically generate checkpoint_dir from experiment_name if not provided

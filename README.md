@@ -60,17 +60,17 @@ This is a start but there is still some work to be done:
 
 ```bash
 # Edit config to your liking
-vim configs/faen-small.yaml
+vim configs/faen-tiny.yaml
 
 # Train
-python train.py --config configs/faen-small.yaml 
+python train.py --config configs/faen-tiny.yaml 
 
 # Average checkpoints and quantize the model
-python average_checkpoints.py --config configs/faen-small.yaml
+python average_checkpoints.py --config configs/faen-tiny.yaml
 
 # Convert to CTranslate2 format
-python convert_to_ct2.py --config configs/faen-small.yaml
+python convert_to_ct2.py --config configs/faen-tiny.yaml
 
 # Evaluate (uses quickmt library, https://github.com/quickmt/quickmt)
-python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cpu --batch_size 16 --beam_size 5 --model ./ct2_model
+python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cpu --batch_size 16 --beam_size 1 --model ./ct2_model
 ```

@@ -223,5 +223,4 @@ QUANTIZATION.md
 ct2_model_int8/
 model_avg_int8.pt
 averaged*
-
-
+faen*
