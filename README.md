@@ -51,7 +51,8 @@ This is a start but there is still some work to be done:
 
 * Validation metrics do not seem to be calculated correctly
 * The `generate` and `beam_search` methods in `model.py` does not seem to be implemented correctly
-* Lots of things are hard-coded and should be configurable
+* All model files (tokenizers vocab files etc) should be stored in a single model run directory (maybe named after the experiment)
+* Rather than truncating inputs that are too long, the dataloader should probably drop/ignore them
 * ... etc
 
 
@@ -59,16 +60,16 @@ This is a start but there is still some work to be done:
 
 ```bash
 # Edit config to your liking
-vim configs/faen-base.yaml
+vim configs/faen-small.yaml
 
 # Train
-python train.py --config configs/faen-base.yaml 
+python train.py --config configs/faen-small.yaml 
 
 # Average checkpoints and quantize the model
-python average_checkpoints.py --config configs/faen-base.yaml
+python average_checkpoints.py --config configs/faen-small.yaml
 
 # Convert to CTranslate2 format
-python convert_to_ct2.py --config configs/faen-base.yaml
+python convert_to_ct2.py --config configs/faen-small.yaml
 
 # Evaluate (uses quickmt library, https://github.com/quickmt/quickmt)
 python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cpu --batch_size 16 --beam_size 5 --model ./ct2_model

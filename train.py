@@ -58,6 +58,11 @@ def train(model_cfg=None, train_cfg=None):
     torch.set_float32_matmul_precision("high")
 
     model = Seq2SeqTransformer(model_cfg).to(device)
+
+    # Convert model to bfloat16 for reduced memory footprint
+    if torch.cuda.is_available():
+        model = model.to(dtype=torch.bfloat16)
+        
     model = torch.compile(model)
 
     if torch.cuda.device_count() > 1:

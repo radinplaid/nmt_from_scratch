@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     args = parser.parse_args()
 
-    model_cfg, train_cfg, avg_cfg, _ = load_config(args.config)
+    model_cfg, train_cfg, export_cfg = load_config(args.config)
 
     # 1. Find the last k models
     if not os.path.exists(train_cfg.checkpoint_dir):
@@ -30,7 +30,7 @@ def main():
     # Sort by step number
     checkpoints.sort(key=lambda x: int(x.split("_")[1].split(".")[0]), reverse=True)
 
-    selected = checkpoints[: avg_cfg.k]
+    selected = checkpoints[: export_cfg.k]
 
     if not selected:
         print("No model files found.")
@@ -71,29 +71,26 @@ def main():
             )
 
     # 3. Save as .pt and .safetensors (FP32/Averaged weights)
-    pt_output = f"{avg_cfg.output_prefix}.pt"
+    pt_output = f"{export_cfg.output_prefix}.pt"
     torch.save({"model_state_dict": avg_state_dict}, pt_output)
 
-    st_output = f"{avg_cfg.output_prefix}.safetensors"
+    st_output = f"{export_cfg.output_prefix}.safetensors"
     save_file(avg_state_dict, st_output)
     print(f"Saved averaged model to {pt_output} and {st_output}")
 
     # 4. Calibration and INT8 Export
     # The calibration seems to help a very slight amount compared to int8 quantization with ctranslate2
     # It also enables smaller pt/safetensors model files
-    if avg_cfg.export_int8:
+    if export_cfg.export_int8:
         print("\nStarting re-calibration for INT8 export...")
 
         # Override settings for calibration
-        train_cfg.batch_size = 8
         train_cfg.max_tokens_per_batch = 2048
         train_cfg.buffer_size = 10000
         train_cfg.num_workers = 0
         _, dev_loader, _, _ = PrepareData(model_cfg, train_cfg)
 
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        device = "cpu"
-        model = Seq2SeqTransformer(model_cfg).to(device)
+        model = Seq2SeqTransformer(model_cfg).to("cpu")
 
         # Load averaged weights BEFORE preparing for quantization
         print("Loading averaged weights...")
@@ -115,11 +112,11 @@ def main():
         torch.ao.quantization.prepare(model, inplace=True)
 
         # Calibrate
-        model.calibrate(dev_loader, num_batches=avg_cfg.calib_batches)
+        model.calibrate(dev_loader, num_batches=export_cfg.calib_batches)
 
         # Convert and Save
         model.convert_to_int8()
-        int8_output = f"{avg_cfg.output_prefix}_int8.pt"
+        int8_output = f"{export_cfg.output_prefix}_int8.pt"
         torch.save({"model_state_dict": model.state_dict()}, int8_output)
         print(f"Saved calibrated INT8 model to {int8_output}")
 

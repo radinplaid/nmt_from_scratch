@@ -6,10 +6,9 @@ model:
   ffn_dim: 4096
   max_len: 256
   vocab_size: 32000
-  
+
 train:
   experiment_name: "faen-base"
-  checkpoint_dir: "checkpoints"
   src_lang: "fa"
   tgt_lang: "en"
   src_train_path: "data/train.fa"

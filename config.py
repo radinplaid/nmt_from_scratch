@@ -16,9 +16,8 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    experiment_name: str = "v30-large"
-    aim_repo: str = "~/mt/.aim"
-    batch_size: int = 32
+    experiment_name: str = "default"
+    aim_repo: str = "~/.aim"
     max_tokens_per_batch: int = 4000
     buffer_size: int = 50000
     num_workers: int = 2
@@ -34,7 +33,7 @@ class TrainConfig:
     max_steps: int = 100000
     eval_steps: int = 2500
     max_checkpoints: int = 4
-    checkpoint_dir: str = "checkpoints"
+    checkpoint_dir: str = None  # type: ignore[assignment]
 
     # Data params
     src_lang: str = "fa"
@@ -44,22 +43,27 @@ class TrainConfig:
     src_dev_path: str = "data/dev.fa"
     tgt_dev_path: str = "data/dev.en"
 
+    def __post_init__(self):
+        # Dynamically generate checkpoint_dir from experiment_name if not provided
+        if self.checkpoint_dir is None:
+            self.checkpoint_dir = self.experiment_name
+
 
 @dataclass
-class AveragingConfig:
-    k: int = 4
-    output_prefix: str = "averaged_model"
+class ExportConfig:
+    k: int = 1
     export_int8: bool = False
     calib_batches: int = 200
-
-
-@dataclass
-class CT2Config:
     model_path: str = "averaged_model.safetensors"
     output_dir: str = "ct2_model"
     src_vocab: str = "tokenizer_src.vocab"
     tgt_vocab: str = "tokenizer_tgt.vocab"
     quantization: str = "int8"
+
+    def __post_init__(self):
+        # Dynamically generate checkpoint_dir from experiment_name if not provided
+        if self.output_prefix is None:
+            self.output_prefix = "averaged_model"
 
 
 def _from_dict(cls, d):
@@ -78,7 +82,6 @@ def load_config(path: str):
 
     model_config = _from_dict(ModelConfig, cfg.get("model", {}))
     train_config = _from_dict(TrainConfig, cfg.get("train", {}))
-    avg_config = _from_dict(AveragingConfig, cfg.get("averaging", {}))
-    ct2_config = _from_dict(CT2Config, cfg.get("ct2", {}))
+    export_config = _from_dict(ExportConfig, cfg.get("export", {}))
 
-    return model_config, train_config, avg_config, ct2_config
+    return model_config, train_config, export_config

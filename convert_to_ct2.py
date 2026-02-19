@@ -151,12 +151,12 @@ def main():
     args = parser.parse_args()
 
     # 1. Load config and weights
-    model_cfg, _, _, ct2_cfg = load_config(args.config)
+    model_cfg, _, export_cfg = load_config(args.config)
 
-    if ct2_cfg.model_path.endswith(".safetensors"):
-        state_dict = load_file(ct2_cfg.model_path, device="cpu")
+    if export_cfg.model_path.endswith(".safetensors"):
+        state_dict = load_file(export_cfg.model_path, device="cpu")
     else:
-        state_dict = torch.load(ct2_cfg.model_path, map_location="cpu")
+        state_dict = torch.load(export_cfg.model_path, map_location="cpu")
         if "model_state_dict" in state_dict:
             state_dict = state_dict["model_state_dict"]
         elif "model" in state_dict:
@@ -269,19 +269,19 @@ def main():
     set_layer_norm(decoder_spec.layer_norm, state_dict, "decoder.norm")
 
     # 6. Save model
-    if not os.path.exists(ct2_cfg.output_dir):
-        os.makedirs(ct2_cfg.output_dir)
+    if not os.path.exists(export_cfg.output_dir):
+        os.makedirs(export_cfg.output_dir)
 
     spec = ctranslate2.specs.TransformerSpec(encoder_spec, decoder_spec)
     print(spec.config.__dict__)
-    spec.config.add_source_bos = True
-    spec.config.add_source_eos = False
+    spec.config.add_source_bos = True # type: ignore
+    spec.config.add_source_eos = False # type: ignore
     #'add_source_bos': False, 'add_source_eos': False,
     # ..decoder_start_token = "<s>"
 
     # Register vocabularies
-    spec.register_source_vocabulary(convert_vocab(ct2_cfg.src_vocab))
-    spec.register_target_vocabulary(convert_vocab(ct2_cfg.tgt_vocab))
+    spec.register_source_vocabulary(convert_vocab(export_cfg.src_vocab))
+    spec.register_target_vocabulary(convert_vocab(export_cfg.tgt_vocab))
 
     # Debug: Check variable types
     for name, value in spec.variables().items():
@@ -296,13 +296,13 @@ def main():
     except Exception as e:
         print(f"Model validation failed: {e}")
 
-    spec.optimize(quantization=ct2_cfg.quantization)
-    spec.save(ct2_cfg.output_dir)
-    print(f"Model saved to {ct2_cfg.output_dir}")
+    spec.optimize(quantization=export_cfg.quantization)
+    spec.save(export_cfg.output_dir)
+    print(f"Model saved to {export_cfg.output_dir}")
 
     # Copy Tokenizers to output directory
-    shutil.copy("tokenizer_src.model", Path(ct2_cfg.output_dir) / "src.spm.model")
-    shutil.copy("tokenizer_tgt.model", Path(ct2_cfg.output_dir) / "tgt.spm.model")
+    shutil.copy("tokenizer_src.model", Path(export_cfg.output_dir) / "src.spm.model")
+    shutil.copy("tokenizer_tgt.model", Path(export_cfg.output_dir) / "tgt.spm.model")
 
 
 if __name__ == "__main__":

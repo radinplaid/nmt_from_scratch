@@ -8,7 +8,6 @@ model:
   vocab_size: 20000
 train:
   experiment_name: "faen-small"
-  checkpoint_dir: "faen-small/checkpoints"
   src_lang: "fa"
   tgt_lang: "en"
   src_train_path: "data/train.fa"
