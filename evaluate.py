@@ -1,23 +1,17 @@
-import torch
 import argparse
 from quickmt import Translator
-from config import ModelConfig
-import sentencepiece as spm
+from config import load_config
 import sacrebleu
-from tqdm import tqdm
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, help="Path to config file")
     parser.add_argument(
         "--model", type=str, required=True, help="Path to ctranslate2 model folder"
     )
-    parser.add_argument(
-        "--src_file", type=str, required=True, help="Path to source text file"
-    )
-    parser.add_argument(
-        "--ref_file", type=str, required=True, help="Path to reference text file"
-    )
+    parser.add_argument("--src_file", type=str, help="Path to source text file")
+    parser.add_argument("--ref_file", type=str, help="Path to reference text file")
     parser.add_argument(
         "--beam_size", type=int, default=5, help="Beam size for decoding"
     )
@@ -35,6 +29,17 @@ def main():
         "--compute_type", type=str, default="auto", help="CTranslate2 compute type"
     )
     args = parser.parse_args()
+
+    # Load defaults from config if available
+    if args.config:
+        model_cfg, train_cfg = load_config(args.config)
+        if args.src_file is None:
+            args.src_file = train_cfg.src_dev_path
+        if args.ref_file is None:
+            args.ref_file = train_cfg.tgt_dev_path
+
+    if args.src_file is None or args.ref_file is None:
+        parser.error("src_file and ref_file are required (or valid config file)")
 
     print(f"Using device: {args.device}")
 

@@ -1,5 +1,6 @@
 import torch
 import torch.optim as optim
+import torch.nn as nn
 from config import ModelConfig, TrainConfig
 
 from model import Seq2SeqTransformer
@@ -13,7 +14,7 @@ from aim import Run
 from safetensors.torch import save_file
 
 
-def train():
+def train(model_cfg=None, train_cfg=None):
     training_start = time.time()
 
     def get_time_info():
@@ -23,8 +24,10 @@ def train():
         return f"[{curr_time}] [{elapsed_str}]"
 
     # Configs
-    model_cfg = ModelConfig()
-    train_cfg = TrainConfig()
+    if model_cfg is None:
+        model_cfg = ModelConfig()
+    if train_cfg is None:
+        train_cfg = TrainConfig()
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -56,6 +59,12 @@ def train():
 
     model = Seq2SeqTransformer(model_cfg).to(device)
     model = torch.compile(model)
+
+    if torch.cuda.device_count() > 1:
+        print(
+            f"{get_time_info()} Detected {torch.cuda.device_count()} GPUs. Using DataParallel."
+        )
+        model = nn.DataParallel(model)
     print(
         f"{get_time_info()} Model parameters: {sum(p.numel() for p in model.parameters())}"
     )
@@ -195,6 +204,12 @@ def train():
                         src, tgt, return_outputs=True
                     )
 
+                # Handle DataParallel output (vectors per GPU)
+                if loss_sum.ndim > 0:
+                    loss_sum = loss_sum.sum()
+                if num_tokens_batch.ndim > 0:
+                    num_tokens_batch = num_tokens_batch.sum()
+
                 # Accumulate loss and tokens
                 total_loss_sum += loss_sum.item()
                 total_tokens += num_tokens_batch.item()
@@ -210,8 +225,12 @@ def train():
                     if use_autoregressive:
                         # True autoregressive generation including encoding
                         # We can manually encode to match previous behavior of reusing encoder output
-                        enc = model.encode(src)
-                        generated_ids = model.generate(src, max_len=256, enc_output=enc)
+                        # Handle DataParallel wrapper
+                        raw_model = model.module if hasattr(model, "module") else model
+                        enc = raw_model.encode(src)
+                        generated_ids = raw_model.generate(
+                            src, max_len=256, enc_output=enc
+                        )
                     else:
                         # Teacher-forced predictions (fastest, uses existing logits)
                         generated_ids = preds
@@ -285,6 +304,12 @@ def train():
                 loss, num_tokens = model(
                     src, tgt, label_smoothing=train_cfg.label_smoothing
                 )
+
+                # Handle DataParallel output (vectors per GPU)
+                if loss.ndim > 0:
+                    loss = loss.sum()
+                if num_tokens.ndim > 0:
+                    num_tokens = num_tokens.sum()
 
             loss.backward()
             accum_loss += loss.item()
@@ -377,7 +402,9 @@ def train():
                 t_tensor = tgt[i : i + 1]
 
                 # Generate
-                generated_ids = model.generate(s_tensor, max_len=model_cfg.max_len)
+                # Handle DataParallel wrapper
+                raw_model = model.module if hasattr(model, "module") else model
+                generated_ids = raw_model.generate(s_tensor, max_len=model_cfg.max_len)
 
                 # Decoding
                 # Helper to remove padding and decode
@@ -407,4 +434,16 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+    from config import load_config
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, help="Path to config file")
+    args = parser.parse_args()
+
+    model_cfg = None
+    train_cfg = None
+    if args.config:
+        model_cfg, train_cfg, _, _ = load_config(args.config)
+
+    train(model_cfg, train_cfg)

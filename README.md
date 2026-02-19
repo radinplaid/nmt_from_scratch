@@ -57,19 +57,19 @@ This is a start but there is still some work to be done:
 
 ## Usage
 
-```
+```bash
 # Edit config to your liking
-vim config.py
+vim configs/faen-base.yaml
 
 # Train
-python train.py 
+python train.py --config configs/faen-base.yaml 
 
 # Average checkpoints and quantize the model
-python average_checkpoints.py --k 4 --checkpoint_dir checkpoints --output_prefix model_avg --export_int8 --calib_batches 200
+python average_checkpoints.py --config configs/faen-base.yaml
 
 # Convert to CTranslate2 format
-python convert_to_ct2.py --model_path model_avg_int8.pt --output_dir ct2_model --quantization int8
+python convert_to_ct2.py --config configs/faen-base.yaml
 
 # Evaluate (uses quickmt library, https://github.com/quickmt/quickmt)
-python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cuda --batch_size 16 --beam_size 5 --model ./ct2_model
+python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cpu --batch_size 16 --beam_size 5 --model ./ct2_model
 ```

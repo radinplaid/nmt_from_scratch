@@ -4,15 +4,10 @@ import os
 import argparse
 import torch
 from safetensors.torch import load_file
-from config import ModelConfig
+from config import load_config
 from collections import OrderedDict
 import shutil
 from pathlib import Path
-
-from config import ModelConfig, TrainConfig
-
-model_config = ModelConfig()
-train_config = TrainConfig()
 
 
 def get_layer_weights(state_dict, prefix):
@@ -152,33 +147,16 @@ def convert_vocab(sp_vocab_path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, default="model_avg.safetensors")
-    parser.add_argument("--output_dir", type=str, default="ct2_model")
-    parser.add_argument("--src_vocab", type=str, default="tokenizer_src.vocab")
-    parser.add_argument("--tgt_vocab", type=str, default="tokenizer_tgt.vocab")
-    parser.add_argument(
-        "--quantization",
-        type=str,
-        default=None,
-        choices=[
-            "int8",
-            "int8_float32",
-            "int8_float16",
-            "int8_bfloat16",
-            "int16",
-            "float16",
-            "bfloat16",
-            "float32",
-        ],
-    )
+    parser.add_argument("--config", type=str, required=True, help="Path to config file")
     args = parser.parse_args()
 
     # 1. Load config and weights
-    cfg = ModelConfig()
-    if args.model_path.endswith(".safetensors"):
-        state_dict = load_file(args.model_path, device="cpu")
+    model_cfg, _, _, ct2_cfg = load_config(args.config)
+
+    if ct2_cfg.model_path.endswith(".safetensors"):
+        state_dict = load_file(ct2_cfg.model_path, device="cpu")
     else:
-        state_dict = torch.load(args.model_path, map_location="cpu")
+        state_dict = torch.load(ct2_cfg.model_path, map_location="cpu")
         if "model_state_dict" in state_dict:
             state_dict = state_dict["model_state_dict"]
         elif "model" in state_dict:
@@ -193,14 +171,14 @@ def main():
 
     # 2. Initialize Specs
     encoder_spec = ctranslate2.specs.TransformerEncoderSpec(
-        num_layers=cfg.enc_layers,
-        num_heads=cfg.n_heads,
+        num_layers=model_cfg.enc_layers,
+        num_heads=model_cfg.n_heads,
         pre_norm=True,
         activation=ctranslate2.specs.Activation.GELU,
     )
     decoder_spec = ctranslate2.specs.TransformerDecoderSpec(
-        num_layers=cfg.dec_layers,
-        num_heads=cfg.n_heads,
+        num_layers=model_cfg.dec_layers,
+        num_heads=model_cfg.n_heads,
         pre_norm=True,
         activation=ctranslate2.specs.Activation.GELU,
     )
@@ -239,7 +217,7 @@ def main():
     set_linear(decoder_spec.projection, state_dict, "generator")
 
     # 4. Encoder Layers
-    for i in range(cfg.enc_layers):
+    for i in range(model_cfg.enc_layers):
         prefix = f"encoder.layers.{i}"
         layer_spec = encoder_spec.layer[i]
 
@@ -261,7 +239,7 @@ def main():
     set_layer_norm(encoder_spec.layer_norm, state_dict, "encoder.norm")
 
     # 5. Decoder Layers
-    for i in range(cfg.dec_layers):
+    for i in range(model_cfg.dec_layers):
         prefix = f"decoder.layers.{i}"
         layer_spec = decoder_spec.layer[i]
 
@@ -291,8 +269,8 @@ def main():
     set_layer_norm(decoder_spec.layer_norm, state_dict, "decoder.norm")
 
     # 6. Save model
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+    if not os.path.exists(ct2_cfg.output_dir):
+        os.makedirs(ct2_cfg.output_dir)
 
     spec = ctranslate2.specs.TransformerSpec(encoder_spec, decoder_spec)
     print(spec.config.__dict__)
@@ -302,8 +280,8 @@ def main():
     # ..decoder_start_token = "<s>"
 
     # Register vocabularies
-    spec.register_source_vocabulary(convert_vocab(args.src_vocab))
-    spec.register_target_vocabulary(convert_vocab(args.tgt_vocab))
+    spec.register_source_vocabulary(convert_vocab(ct2_cfg.src_vocab))
+    spec.register_target_vocabulary(convert_vocab(ct2_cfg.tgt_vocab))
 
     # Debug: Check variable types
     for name, value in spec.variables().items():
@@ -318,13 +296,13 @@ def main():
     except Exception as e:
         print(f"Model validation failed: {e}")
 
-    spec.optimize(quantization=args.quantization)
-    spec.save(args.output_dir)
-    print(f"Model saved to {args.output_dir}")
+    spec.optimize(quantization=ct2_cfg.quantization)
+    spec.save(ct2_cfg.output_dir)
+    print(f"Model saved to {ct2_cfg.output_dir}")
 
     # Copy Tokenizers to output directory
-    shutil.copy("tokenizer_src.model", Path(args.output_dir) / "src.spm.model")
-    shutil.copy("tokenizer_tgt.model", Path(args.output_dir) / "tgt.spm.model")
+    shutil.copy("tokenizer_src.model", Path(ct2_cfg.output_dir) / "src.spm.model")
+    shutil.copy("tokenizer_tgt.model", Path(ct2_cfg.output_dir) / "tgt.spm.model")
 
 
 if __name__ == "__main__":

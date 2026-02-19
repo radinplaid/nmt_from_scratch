@@ -1,0 +1,38 @@
+model:
+  d_model: 768
+  enc_layers: 12
+  dec_layers: 2
+  n_heads: 16
+  ffn_dim: 4096
+  max_len: 256
+  vocab_size: 32000
+  
+train:
+  experiment_name: "faen-base"
+  checkpoint_dir: "checkpoints"
+  src_lang: "fa"
+  tgt_lang: "en"
+  src_train_path: "data/train.fa"
+  tgt_train_path: "data/train.en"
+  src_dev_path: "data/dev.fa"
+  tgt_dev_path: "data/dev.en"
+  aim_repo: "~/mt/.aim"
+  max_tokens_per_batch: 4000
+  buffer_size: 50000
+  num_workers: 2
+  lr: 8.5e-4
+  accum_steps: 30
+  warmup_steps: 5000
+  max_steps: 100000
+  eval_steps: 2500
+  max_checkpoints: 4
+
+averaging:
+  k: 2
+  export_int8: true
+  calib_batches: 200
+
+ct2:
+  model_path: "averaged_model.safetensors"
+  output_dir: "ct2_model"
+  quantization: "int8"
