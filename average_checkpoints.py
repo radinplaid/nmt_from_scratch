@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     args = parser.parse_args()
 
-    model_cfg, train_cfg, export_cfg = load_config(args.config)
+    model_cfg, data_cfg, train_cfg, export_cfg = load_config(args.config)
 
     # 1. Find the last k models
     if not os.path.exists(train_cfg.checkpoint_dir):
@@ -60,17 +60,18 @@ def main():
 
     # Divide by count
     for k in avg_state_dict:
-        # Only divide floating point tensors (not scale/zero_point which might be int but are usually float in fake_quant)
+        # Only divide floating point tensors
         if avg_state_dict[k].is_floating_point():
             avg_state_dict[k] = avg_state_dict[k] / count
         else:
-            # For integer buffers (like zero_point), use integer division or just keep last?
-            # Usually zero_point in fake_quant is a float tensor in observers.
             avg_state_dict[k] = torch.div(
                 avg_state_dict[k], count, rounding_mode="floor"
             )
 
     # 3. Save as .pt and .safetensors (FP32/Averaged weights)
+    # Ensure experiment directory exists
+    os.makedirs(train_cfg.experiment_name, exist_ok=True)
+
     pt_output = f"{export_cfg.output_prefix}.pt"
     torch.save({"model_state_dict": avg_state_dict}, pt_output)
 
@@ -79,16 +80,14 @@ def main():
     print(f"Saved averaged model to {pt_output} and {st_output}")
 
     # 4. Calibration and INT8 Export
-    # The calibration seems to help a very slight amount compared to int8 quantization with ctranslate2
-    # It also enables smaller pt/safetensors model files
     if export_cfg.export_int8:
         print("\nStarting re-calibration for INT8 export...")
 
         # Override settings for calibration
-        train_cfg.max_tokens_per_batch = 2048
-        train_cfg.buffer_size = 10000
-        train_cfg.num_workers = 0
-        _, dev_loader, _, _ = PrepareData(model_cfg, train_cfg)
+        data_cfg.max_tokens_per_batch = 2048
+        data_cfg.buffer_size = 10000
+        data_cfg.num_workers = 0
+        _, dev_loader, _, _ = PrepareData(model_cfg, data_cfg, train_cfg)
 
         model = Seq2SeqTransformer(model_cfg).to("cpu")
 
@@ -100,10 +99,11 @@ def main():
         # Prepare model for Post-Training Quantization (PTQ)
         print("Preparing model for Post-Training Quantization (PTQ)...")
         # Set quantization config
-        model.qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
+        model.qconfig = torch.ao.quantization.get_default_qconfig(
+            export_cfg.qconfig_backend
+        )
 
-        # Disable quantization for Embedding as it requires special qconfig (e.g. float16 or quint8)
-        # MultiheadAttention is now kept enabled as we've ensured boolean masks in model.py
+        # Disable quantization for Embedding
         for name, module in model.named_modules():
             if any(k in name for k in ["self_attn", "multihead_attn", "emb"]):
                 module.qconfig = None  # type: ignore

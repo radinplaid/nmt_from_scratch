@@ -1,7 +1,7 @@
 import torch
 import torch.optim as optim
 import torch.nn as nn
-from config import ModelConfig, TrainConfig
+from config import ModelConfig, DataConfig, TrainConfig
 
 from model import Seq2SeqTransformer
 from data import PrepareData
@@ -14,7 +14,7 @@ from aim import Run
 from safetensors.torch import save_file
 
 
-def train(model_cfg=None, train_cfg=None):
+def train(model_cfg=None, data_cfg=None, train_cfg=None):
     training_start = time.time()
 
     def get_time_info():
@@ -26,46 +26,52 @@ def train(model_cfg=None, train_cfg=None):
     # Configs
     if model_cfg is None:
         model_cfg = ModelConfig()
+    if data_cfg is None:
+        data_cfg = DataConfig()
     if train_cfg is None:
         train_cfg = TrainConfig()
 
     # Device selection
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if train_cfg.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(train_cfg.device)
     print(f"{get_time_info()} Using device: {device}")
 
     # Performance optimizations
-    if torch.cuda.is_available():
+    if device.type == "cuda":
         torch.backends.cudnn.benchmark = True  # Enable cudnn autotuner
-        torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 on matmul (Ampere+)
-        torch.backends.cudnn.allow_tf32 = True  # Allow TF32 on cudnn
-        # Do NOT call empty_cache at start - it's unnecessary and may slow down
-        # Do NOT set memory fraction unless you have multiple processes
+        torch.backends.cuda.matmul.allow_tf32 = train_cfg.tf32  # Allow TF32 on matmul
+        torch.backends.cudnn.allow_tf32 = train_cfg.tf32  # Allow TF32 on cudnn
+        if train_cfg.tf32:
+            torch.set_float32_matmul_precision("high")
 
     run = Run(repo=train_cfg.aim_repo, experiment=train_cfg.experiment_name)
     run["hparams"] = {
-        **{k: v for k, v in model_cfg.__dict__.items()},
-        **{k: v for k, v in train_cfg.__dict__.items()},
+        **{f"model_{k}": v for k, v in model_cfg.__dict__.items()},
+        **{f"data_{k}": v for k, v in data_cfg.__dict__.items()},
+        **{f"train_{k}": v for k, v in train_cfg.__dict__.items()},
     }
 
     # Data
     print(f"{get_time_info()} Preparing data...")
 
-    train_loader, dev_loader, src_sp, tgt_sp = PrepareData(model_cfg, train_cfg)
+    train_loader, dev_loader, src_sp, tgt_sp = PrepareData(
+        model_cfg, data_cfg, train_cfg
+    )
 
     # Model
     print(f"{get_time_info()} Initializing model...")
-    # Enable TF32 for speed on Ampere+
-    torch.set_float32_matmul_precision("high")
 
     model = Seq2SeqTransformer(model_cfg).to(device)
 
-    # Convert model to bfloat16 for reduced memory footprint
-    if torch.cuda.is_available():
+    # Convert model to precision for reduced memory footprint
+    if device.type == "cuda" and train_cfg.precision == "bf16":
         model = model.to(dtype=torch.bfloat16)
-        
+
     model = torch.compile(model)
 
-    if torch.cuda.device_count() > 1:
+    if torch.cuda.device_count() > 1 and train_cfg.device in ["cuda", "auto"]:
         print(
             f"{get_time_info()} Detected {torch.cuda.device_count()} GPUs. Using DataParallel."
         )
@@ -105,6 +111,9 @@ def train(model_cfg=None, train_cfg=None):
     global_step = 0
 
     def save_checkpoint(step, model, optimizer, scheduler, config):
+        # Ensure experiment directory exists
+        os.makedirs(config.experiment_name, exist_ok=True)
+
         if not os.path.exists(config.checkpoint_dir):
             os.makedirs(config.checkpoint_dir)
 
@@ -171,18 +180,19 @@ def train(model_cfg=None, train_cfg=None):
             os.remove(os.path.join(config.checkpoint_dir, models_st[0]))
             print(f"{get_time_info()} Removed old weights: {models_st[0]}")
 
-    def validate(model, loader, src_sp, tgt_sp, device, use_autoregressive=False):
+    def validate(
+        model,
+        loader,
+        src_sp,
+        tgt_sp,
+        device,
+        train_cfg,
+        data_cfg,
+        model_cfg,
+        use_autoregressive=False,
+    ):
         """
         Validate the model.
-
-        Args:
-            model: The seq2seq model
-            loader: Validation data loader
-            src_sp: Source sentencepiece tokenizer
-            tgt_sp: Target sentencepiece tokenizer
-            device: Device to run on
-            use_autoregressive: If True, use true autoregressive generation with pre-computed encoder.
-                               If False (default), use teacher-forced predictions (faster, less memory).
         """
         model.eval()
         total_loss_sum = 0
@@ -190,12 +200,16 @@ def train(model_cfg=None, train_cfg=None):
         correct_tokens = 0
 
         # Limit samples for BLEU calculation to reduce memory
-        max_samples = 500
+        max_samples = train_cfg.val_max_samples
         hypotheses = []
         references = []
         sample_count = 0
 
         # Use inference_mode instead of no_grad for better performance
+        autocast_dtype = (
+            torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
+        )
+
         with torch.inference_mode():
             for batch_idx, (src, tgt) in enumerate(loader):
                 src, tgt = (
@@ -204,7 +218,7 @@ def train(model_cfg=None, train_cfg=None):
                 )
 
                 # Forward pass for loss and logits (calculates loss internally)
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                     loss_sum, (logits, num_tokens_batch) = model(
                         src, tgt, return_outputs=True
                     )
@@ -222,19 +236,21 @@ def train(model_cfg=None, train_cfg=None):
                 # Accuracy calculation
                 tgt_labels = tgt[:, 1:]
                 preds = logits.argmax(dim=-1)
-                mask_acc = tgt_labels != 0
+                mask_acc = tgt_labels != model_cfg.pad_id
                 correct_tokens += ((preds == tgt_labels) & mask_acc).sum().item()
 
                 # Generation for BLEU/ChrF - only process if we still need samples
                 if sample_count < max_samples:
                     if use_autoregressive:
                         # True autoregressive generation including encoding
-                        # We can manually encode to match previous behavior of reusing encoder output
-                        # Handle DataParallel wrapper
                         raw_model = model.module if hasattr(model, "module") else model
                         enc = raw_model.encode(src)
                         generated_ids = raw_model.generate(
-                            src, max_len=256, enc_output=enc
+                            src,
+                            max_len=model_cfg.max_len,
+                            enc_output=enc,
+                            bos_id=model_cfg.bos_id,
+                            eos_id=model_cfg.eos_id,
                         )
                     else:
                         # Teacher-forced predictions (fastest, uses existing logits)
@@ -243,11 +259,14 @@ def train(model_cfg=None, train_cfg=None):
                     for i in range(src.size(0)):
                         if sample_count >= max_samples:
                             break
-                        # Post-process: stop at EOS (3) or PAD (0) tokens
+                        # Post-process: stop at EOS or PAD tokens
                         ids = generated_ids[i].tolist()
                         # Find first EOS or PAD token and truncate
                         for idx, token_id in enumerate(ids):
-                            if token_id == 3 or token_id == 0:  # eos_id or pad_id
+                            if (
+                                token_id == model_cfg.eos_id
+                                or token_id == model_cfg.pad_id
+                            ):
                                 ids = ids[:idx]
                                 break
                         hyp = tgt_sp.decode(ids)
@@ -255,9 +274,6 @@ def train(model_cfg=None, train_cfg=None):
                         hypotheses.append(hyp)
                         references.append(ref)
                         sample_count += 1
-
-                # No need to delete tensors; they will be freed automatically
-                # Avoid calling empty_cache frequently (slows down)
 
         avg_loss = total_loss_sum / max(1, total_tokens)
         ppl = math.exp(min(avg_loss, 100))
@@ -283,6 +299,8 @@ def train(model_cfg=None, train_cfg=None):
     # Loop
     model.train()
     optimizer.zero_grad()
+    autocast_dtype = torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
+
     for epoch in range(train_cfg.epochs):
         start_time = time.time()
         total_loss_sum = 0
@@ -303,9 +321,7 @@ def train(model_cfg=None, train_cfg=None):
                 tgt.to(device, non_blocking=True),
             )
 
-            # Allow any efficient backend (Flash or MemEfficient). Math is fallback.
-            # We don't strictly enforce Flash because it might fail with certain masks/dtypes.
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 loss, num_tokens = model(
                     src, tgt, label_smoothing=train_cfg.label_smoothing
                 )
@@ -324,8 +340,8 @@ def train(model_cfg=None, train_cfg=None):
             total_tokens_epoch += num_tokens.item()
 
             # Throughput tracking
-            batch_src_tokens += (src != 0).sum().item()
-            batch_tgt_tokens += (tgt != 0).sum().item()
+            batch_src_tokens += (src != model_cfg.pad_id).sum().item()
+            batch_tgt_tokens += (tgt != model_cfg.pad_id).sum().item()
 
             if (batch_idx + 1) % train_cfg.accum_steps == 0:
                 # Scale gradients by total number of tokens in the accumulation bucket
@@ -345,7 +361,16 @@ def train(model_cfg=None, train_cfg=None):
 
                 # Validation and Checkpointing
                 if global_step % train_cfg.eval_steps == 0:
-                    val_metrics = validate(model, dev_loader, src_sp, tgt_sp, device)
+                    val_metrics = validate(
+                        model,
+                        dev_loader,
+                        src_sp,
+                        tgt_sp,
+                        device,
+                        train_cfg,
+                        data_cfg,
+                        model_cfg,
+                    )
                     for k, v in val_metrics.items():
                         run.track(
                             v,
@@ -356,7 +381,7 @@ def train(model_cfg=None, train_cfg=None):
                     save_checkpoint(global_step, model, optimizer, scheduler, train_cfg)
 
             # Progress Print
-            if batch_idx % 1000 == 0:
+            if batch_idx % train_cfg.log_steps == 0:
                 curr_lr = optimizer.param_groups[0]["lr"]
                 elapsed = time.time() - last_log_time
                 in_tok_s = batch_src_tokens / max(1e-6, elapsed)
@@ -391,40 +416,52 @@ def train(model_cfg=None, train_cfg=None):
 
     print(f"{get_time_info()} Training complete.")
 
-    # Quick Test with 5 examples from dev data
-    print(f"\n{get_time_info()} Running final quick test on 5 dev samples:")
+    # Quick Test with examples from dev data
+    print(
+        f"\n{get_time_info()} Running final quick test on {train_cfg.quick_test_samples} dev samples:"
+    )
     model.eval()
 
     samples_found = 0
     with torch.inference_mode():
         for src, tgt in dev_loader:
             src, tgt = src.to(device), tgt.to(device)
-            # Process up to 5 samples from this batch
-            n = min(5 - samples_found, src.size(0))
+            # Process up to n samples from this batch
+            n = min(train_cfg.quick_test_samples - samples_found, src.size(0))
 
             for i in range(n):
                 s_tensor = src[i : i + 1]
                 t_tensor = tgt[i : i + 1]
 
                 # Generate
-                # Handle DataParallel wrapper
                 raw_model = model.module if hasattr(model, "module") else model
-                generated_ids = raw_model.generate(s_tensor, max_len=model_cfg.max_len)
+                generated_ids = raw_model.generate(
+                    s_tensor,
+                    max_len=model_cfg.max_len,
+                    bos_id=model_cfg.bos_id,
+                    eos_id=model_cfg.eos_id,
+                )
 
                 # Decoding
                 # Helper to remove padding and decode
-                def cleanup_and_decode(ids_tensor, sp):
+                def cleanup_and_decode(ids_tensor, sp, pad_id, eos_id):
                     ids = ids_tensor[0].tolist()
-                    # Stop at EOS (3) or PAD (0) tokens
+                    # Stop at EOS or PAD tokens
                     for idx, token_id in enumerate(ids):
-                        if token_id == 3 or token_id == 0:  # eos_id or pad_id
+                        if token_id == eos_id or token_id == pad_id:
                             ids = ids[:idx]
                             break
                     return sp.decode(ids)
 
-                s_text = cleanup_and_decode(s_tensor, src_sp)
-                t_ref = cleanup_and_decode(t_tensor, tgt_sp)
-                t_hyp = cleanup_and_decode(generated_ids, tgt_sp)
+                s_text = cleanup_and_decode(
+                    s_tensor, src_sp, model_cfg.pad_id, model_cfg.eos_id
+                )
+                t_ref = cleanup_and_decode(
+                    t_tensor, tgt_sp, model_cfg.pad_id, model_cfg.eos_id
+                )
+                t_hyp = cleanup_and_decode(
+                    generated_ids, tgt_sp, model_cfg.pad_id, model_cfg.eos_id
+                )
 
                 print(f"Example {samples_found + 1}:")
                 print(f"  Input:  {s_text}")
@@ -434,7 +471,7 @@ def train(model_cfg=None, train_cfg=None):
 
                 samples_found += 1
 
-            if samples_found >= 5:
+            if samples_found >= train_cfg.quick_test_samples:
                 break
 
 
@@ -447,12 +484,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     model_cfg = None
+    data_cfg = None
     train_cfg = None
     if args.config:
-        model_cfg, train_cfg, _ = load_config(args.config)
+        model_cfg, data_cfg, train_cfg, _ = load_config(args.config)
 
     print(model_cfg)
-
+    print(data_cfg)
     print(train_cfg)
 
-    train(model_cfg, train_cfg)
+    train(model_cfg, data_cfg, train_cfg)

@@ -52,7 +52,7 @@ class Seq2SeqTransformer(nn.Module):
             dropout=config.dropout,
             batch_first=True,
             norm_first=True,  # Pre-norm performs better
-            activation="gelu",
+            activation=config.activation,
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
@@ -67,7 +67,7 @@ class Seq2SeqTransformer(nn.Module):
             dropout=config.dropout,
             batch_first=True,
             norm_first=True,
-            activation="gelu",
+            activation=config.activation,
         )
         self.decoder = nn.TransformerDecoder(
             decoder_layer,
@@ -84,12 +84,16 @@ class Seq2SeqTransformer(nn.Module):
 
     def encode(self, src, src_mask=None):
         src_emb = self.positional_encoding(self.src_tok_emb(src))
-        # Create padding mask: True where padding tokens (0) exist
-        src_padding_mask = (src == 0).to(torch.bool)
-        
+        # Create padding mask: True where padding tokens exist
+        src_padding_mask = (src == self.config.pad_id).to(torch.bool)
+
         # If src_mask is provided (e.g. for specific attention patterns), ensure it's bool
         if src_mask is not None and src_mask.dtype != torch.bool:
-            src_mask = (src_mask < 0) if src_mask.is_floating_point() else src_mask.to(torch.bool)
+            src_mask = (
+                (src_mask < 0)
+                if src_mask.is_floating_point()
+                else src_mask.to(torch.bool)
+            )
 
         # Ensure the encoder itself uses boolean masks internally
         # This is a workaround for quantizable MultiheadAttention
@@ -111,12 +115,26 @@ class Seq2SeqTransformer(nn.Module):
 
         # Ensure all masks are boolean for quantizable MultiheadAttention
         if tgt_mask is not None and tgt_mask.dtype != torch.bool:
-            tgt_mask = (tgt_mask < 0) if tgt_mask.is_floating_point() else tgt_mask.to(torch.bool)
+            tgt_mask = (
+                (tgt_mask < 0)
+                if tgt_mask.is_floating_point()
+                else tgt_mask.to(torch.bool)
+            )
         if memory_mask is not None and memory_mask.dtype != torch.bool:
-            memory_mask = (memory_mask < 0) if memory_mask.is_floating_point() else memory_mask.to(torch.bool)
-        if tgt_key_padding_mask is not None and tgt_key_padding_mask.dtype != torch.bool:
+            memory_mask = (
+                (memory_mask < 0)
+                if memory_mask.is_floating_point()
+                else memory_mask.to(torch.bool)
+            )
+        if (
+            tgt_key_padding_mask is not None
+            and tgt_key_padding_mask.dtype != torch.bool
+        ):
             tgt_key_padding_mask = tgt_key_padding_mask.to(torch.bool)
-        if memory_key_padding_mask is not None and memory_key_padding_mask.dtype != torch.bool:
+        if (
+            memory_key_padding_mask is not None
+            and memory_key_padding_mask.dtype != torch.bool
+        ):
             memory_key_padding_mask = memory_key_padding_mask.to(torch.bool)
 
         out = self.decoder(
@@ -137,9 +155,7 @@ class Seq2SeqTransformer(nn.Module):
         # tgt: (batch, tgt_len) - contains BOS and EOS
 
         # Create masks
-        # Ensure masks are explicitly boolean for quantizable modules
-        # Create fresh boolean tensors to prevent dtype conversion issues during PTQ
-        src_padding_mask = (src == 0).to(torch.bool)
+        src_padding_mask = (src == self.config.pad_id).to(torch.bool)
 
         # For training, we align input and target
         # Input to decoder: tgt[:, :-1] (BOS ... last_token)
@@ -148,27 +164,21 @@ class Seq2SeqTransformer(nn.Module):
         tgt_input = tgt[:, :-1]
         tgt_out = tgt[:, 1:]
 
-        tgt_padding_mask = (tgt_input == 0).to(torch.bool)
+        tgt_padding_mask = (tgt_input == self.config.pad_id).to(torch.bool)
 
         # Causal mask for decoder autogression
         tgt_len = tgt_input.size(1)
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len).to(
             src.device
         )
-        # Ensure tgt_mask is boolean for quantizable modules
-        # Note: For MultiheadAttention, a float mask is added to attn weights,
-        # but a bool mask is used for masked_fill.
-        # nn.Transformer.generate_square_subsequent_mask returns float (-inf/0).
-        # We convert it to bool (True for mask, False for keep)
+        # Convert to bool
         if tgt_mask.dtype != torch.bool:
-            tgt_mask = (tgt_mask < 0)
+            tgt_mask = tgt_mask < 0
 
         # 1. Encode
-        # Ensure src_padding_mask is passed correctly and is boolean
         memory = self.encode(src)
 
         # 2. Decode
-        # Masks are converted to bool inside self.decode()
         outs = self.decode(
             tgt_input,
             memory,
@@ -181,15 +191,13 @@ class Seq2SeqTransformer(nn.Module):
         logits = self.project(outs)
 
         # 4. Loss
-        # We use reduction='sum' for strict token-based normalization in training
-        # tgt_out contains the targets (shifted right)
-        mask = tgt_out != 0
+        mask = tgt_out != self.config.pad_id
         num_tokens = mask.sum()
 
         loss = nn.functional.cross_entropy(
             logits.reshape(-1, self.config.vocab_size),
             tgt_out.reshape(-1),
-            ignore_index=0,
+            ignore_index=self.config.pad_id,
             label_smoothing=label_smoothing,
             reduction="sum",
         )
@@ -200,10 +208,13 @@ class Seq2SeqTransformer(nn.Module):
         return loss, num_tokens
 
     @torch.no_grad()
-    def generate(self, src, max_len=256, bos_id=2, eos_id=3, enc_output=None):
-        # Ensure mask is explicitly boolean for quantizable modules
-        # Create fresh boolean tensor to prevent dtype conversion issues during PTQ
-        src_padding_mask = (src == 0).to(torch.bool)
+    def generate(self, src, max_len=None, bos_id=None, eos_id=None, enc_output=None):
+        max_len = max_len or self.config.max_len
+        bos_id = bos_id if bos_id is not None else self.config.bos_id
+        eos_id = eos_id if eos_id is not None else self.config.eos_id
+        pad_id = self.config.pad_id
+
+        src_padding_mask = (src == pad_id).to(torch.bool)
         bs = src.size(0)
         device = src.device
 
@@ -217,11 +228,9 @@ class Seq2SeqTransformer(nn.Module):
         finished = torch.zeros(bs, dtype=torch.bool, device=device)
 
         for i in range(max_len):
-            # Decode
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(ys.size(1)).to(
                 device
             )
-            # tgt_mask is converted to bool inside self.decode()
             out = self.decode(
                 ys, memory, tgt_mask=tgt_mask, memory_key_padding_mask=src_padding_mask
             )
@@ -230,13 +239,12 @@ class Seq2SeqTransformer(nn.Module):
             prob = self.project(out[:, -1])
             _, next_word = torch.max(prob, dim=1)
 
-            # Only update sequences that haven't finished
-            # For finished sequences, append PAD (0) instead of the predicted token
+            # Update sequences
             next_word = next_word.clone()
-            next_word[finished] = 0  # Append PAD for finished sequences
+            next_word[finished] = pad_id
             ys = torch.cat([ys, next_word.unsqueeze(1)], dim=1)
 
-            # Track finished sequences
+            # Track finished
             finished = finished | (next_word == eos_id)
 
             if finished.all():
@@ -245,47 +253,35 @@ class Seq2SeqTransformer(nn.Module):
         return ys[:, 1:]
 
     @torch.no_grad()
-    def beam_search(self, src, max_len=256, beam_size=5, bos_id=2, eos_id=3):
+    def beam_search(self, src, max_len=None, beam_size=5, bos_id=None, eos_id=None):
+        max_len = max_len or self.config.max_len
+        bos_id = bos_id if bos_id is not None else self.config.bos_id
+        eos_id = eos_id if eos_id is not None else self.config.eos_id
+        pad_id = self.config.pad_id
+
         # src: (bs, seq_len)
         bs = src.size(0)
         device = src.device
 
         # Encode once
-        # memory: (bs, seq_len, d_model)
         memory = self.encode(src)
 
-        # We need to tile memory for beam search: (bs * beam, seq_len, d_model)
-        # But standard beam search implementation usually keeps batch dimension separate until usually not efficient.
-        # Let's do simple batched beam search where we flatten bs*beam
-
-        # Ensure mask is explicitly boolean for quantizable modules
-        # Create fresh boolean tensor to prevent dtype conversion issues during PTQ
-        src_padding_mask = (src == 0).to(torch.bool)
+        src_padding_mask = (src == pad_id).to(torch.bool)
 
         # Tile memory and mask
-        # memory: (bs, seq, dim) -> (bs*beam, seq, dim)
         memory = memory.repeat_interleave(beam_size, dim=0)
         src_padding_mask = src_padding_mask.repeat_interleave(beam_size, dim=0)
 
-        # Initial input: BOS
-        # beams: (bs*beam, 1) - but initially just (bs, 1) then expanded?
-        # Let's keep beams as (bs, beam_size, seq_len)
-
         # Initialize
-        # scores: (bs, beam_size)
         scores = torch.zeros(bs, beam_size, device=device)
-        scores[:, 1:] = -1e9  # Only first beam is active initially for each batch
+        scores[:, 1:] = -1e9
 
         # inputs: (bs, beam_size, seq_len)
         inputs = torch.full((bs, beam_size, 1), bos_id, dtype=torch.long, device=device)
 
-        # To run explicitly in batch with Transformer, we flatten:
-        # current_inputs: (bs * beam_size, seq_len)
-
         vocab_size = self.config.vocab_size
 
         for i in range(max_len):
-            # Flatten inputs
             curr_seq_len = inputs.size(2)
             flat_inputs = inputs.view(bs * beam_size, curr_seq_len)
 
@@ -294,8 +290,6 @@ class Seq2SeqTransformer(nn.Module):
             )
 
             # Decode
-            # out: (bs*beam, seq, dim)
-            # tgt_mask is converted to bool inside self.decode()
             out = self.decode(
                 flat_inputs,
                 memory,
@@ -303,7 +297,7 @@ class Seq2SeqTransformer(nn.Module):
                 memory_key_padding_mask=src_padding_mask,
             )
 
-            # Logits for last token: (bs*beam, vocab)
+            # Logits for last token
             logits = self.project(out[:, -1])
             log_probs = torch.log_softmax(logits, dim=-1)
 
@@ -311,18 +305,15 @@ class Seq2SeqTransformer(nn.Module):
             log_probs = log_probs.view(bs, beam_size, vocab_size)
 
             # Add to previous scores
-            # scores: (bs, beam) -> (bs, beam, 1)
-            # total_scores: (bs, beam, vocab)
             total_scores = scores.unsqueeze(-1) + log_probs
 
             # Flatten to find top-k across all (beam * vocab) options
-            # (bs, beam * vocab)
             total_scores_flat = total_scores.view(bs, -1)
 
             # Get top k
             top_acc_scores, top_indices = total_scores_flat.topk(beam_size, dim=-1)
 
-            # Convert indices back to (beam_idx, vocab_idx)
+            # Convert indices back
             beam_indices = top_indices // vocab_size
             token_indices = top_indices % vocab_size
 
@@ -330,23 +321,13 @@ class Seq2SeqTransformer(nn.Module):
             scores = top_acc_scores
 
             # Construct new inputs
-            # inputs: (bs, beam, seq)
             new_inputs = []
             for b in range(bs):
-                # source beams for this batch element
-                # inputs[b]: (beam, seq)
                 prev_beams = inputs[b]
+                selected_beam_indices = beam_indices[b]
+                selected_tokens = token_indices[b]
 
-                # selected beams
-                selected_beam_indices = beam_indices[b]  # (beam_size,)
-                selected_tokens = token_indices[b]  # (beam_size,)
-
-                # gather previous sequences
-                selected_sequences = prev_beams[
-                    selected_beam_indices
-                ]  # (beam_size, seq)
-
-                # append new tokens
+                selected_sequences = prev_beams[selected_beam_indices]
                 new_seq = torch.cat(
                     [selected_sequences, selected_tokens.unsqueeze(-1)], dim=-1
                 )
@@ -354,10 +335,7 @@ class Seq2SeqTransformer(nn.Module):
 
             inputs = torch.stack(new_inputs)
 
-        # Check EOS? (Optional optimization: stop if all top beams are EOS)
-
         # Return best beam
-        # inputs: (bs, beam, seq) -> return (bs, seq) of best beam (index 0)
         return inputs[:, 0, 1:]  # Skip BOS
 
     def convert_to_int8(self):

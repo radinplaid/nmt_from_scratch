@@ -151,7 +151,7 @@ def main():
     args = parser.parse_args()
 
     # 1. Load config and weights
-    model_cfg, _, export_cfg = load_config(args.config)
+    model_cfg, data_cfg, train_cfg, export_cfg = load_config(args.config)
 
     if export_cfg.model_path.endswith(".safetensors"):
         state_dict = load_file(export_cfg.model_path, device="cpu")
@@ -170,21 +170,29 @@ def main():
     state_dict = new_state_dict
 
     # 2. Initialize Specs
+    activation_map = {
+        "gelu": ctranslate2.specs.Activation.GELU,
+        "relu": ctranslate2.specs.Activation.RELU,
+        "swish": ctranslate2.specs.Activation.SWISH,
+    }
+    ct2_activation = activation_map.get(
+        model_cfg.activation, ctranslate2.specs.Activation.GELU
+    )
+
     encoder_spec = ctranslate2.specs.TransformerEncoderSpec(
         num_layers=model_cfg.enc_layers,
         num_heads=model_cfg.n_heads,
         pre_norm=True,
-        activation=ctranslate2.specs.Activation.GELU,
+        activation=ct2_activation,
     )
     decoder_spec = ctranslate2.specs.TransformerDecoderSpec(
         num_layers=model_cfg.dec_layers,
         num_heads=model_cfg.n_heads,
         pre_norm=True,
-        activation=ctranslate2.specs.Activation.GELU,
+        activation=ct2_activation,
     )
 
-    # 3. Map weights
-
+    # ... mapping ...
     # Embeddings
     src_emb = state_dict.get("src_tok_emb.embedding.weight")
     if src_emb is not None:
@@ -273,36 +281,31 @@ def main():
         os.makedirs(export_cfg.output_dir)
 
     spec = ctranslate2.specs.TransformerSpec(encoder_spec, decoder_spec)
-    print(spec.config.__dict__)
-    spec.config.add_source_bos = True # type: ignore
-    spec.config.add_source_eos = False # type: ignore
-    #'add_source_bos': False, 'add_source_eos': False,
-    # ..decoder_start_token = "<s>"
+    spec.config.add_source_bos = export_cfg.add_source_bos  # type: ignore
+    spec.config.add_source_eos = export_cfg.add_source_eos  # type: ignore
 
     # Register vocabularies
-    spec.register_source_vocabulary(convert_vocab(export_cfg.src_vocab))
-    spec.register_target_vocabulary(convert_vocab(export_cfg.tgt_vocab))
+    spec.register_source_vocabulary(
+        convert_vocab(f"{data_cfg.tokenizer_prefix_src}.vocab")
+    )
+    spec.register_target_vocabulary(
+        convert_vocab(f"{data_cfg.tokenizer_prefix_tgt}.vocab")
+    )
 
-    # Debug: Check variable types
-    for name, value in spec.variables().items():
-        if not isinstance(value, np.ndarray):
-            print(f"Variable {name} is NOT a numpy array: {type(value)}")
-        elif value.dtype == np.object_:
-            print(f"Variable {name} has object dtype!")
-
-    try:
-        spec.validate()
-        print("Model validation successful.")
-    except Exception as e:
-        print(f"Model validation failed: {e}")
-
+    spec.validate()
     spec.optimize(quantization=export_cfg.quantization)
     spec.save(export_cfg.output_dir)
     print(f"Model saved to {export_cfg.output_dir}")
 
     # Copy Tokenizers to output directory
-    shutil.copy("tokenizer_src.model", Path(export_cfg.output_dir) / "src.spm.model")
-    shutil.copy("tokenizer_tgt.model", Path(export_cfg.output_dir) / "tgt.spm.model")
+    shutil.copy(
+        f"{data_cfg.tokenizer_prefix_src}.model",
+        Path(export_cfg.output_dir) / "src.spm.model",
+    )
+    shutil.copy(
+        f"{data_cfg.tokenizer_prefix_tgt}.model",
+        Path(export_cfg.output_dir) / "tgt.spm.model",
+    )
 
 
 if __name__ == "__main__":

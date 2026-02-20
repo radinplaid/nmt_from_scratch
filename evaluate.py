@@ -32,11 +32,23 @@ def main():
 
     # Load defaults from config if available
     if args.config:
-        model_cfg, train_cfg = load_config(args.config)
+        model_cfg, data_cfg, train_cfg, export_cfg = load_config(args.config)
+
         if args.src_file is None:
-            args.src_file = train_cfg.src_dev_path
+            args.src_file = data_cfg.src_dev_path
         if args.ref_file is None:
-            args.ref_file = train_cfg.tgt_dev_path
+            args.ref_file = data_cfg.tgt_dev_path
+
+        # Pull defaults from export_cfg if not specified on CLI
+        # (Assuming argparse defaults are already set, we only override if user didn't provide)
+        if args.beam_size == 5:  # default in parser
+            args.beam_size = export_cfg.beam_size
+        if args.max_len == 100:  # default in parser
+            args.max_len = export_cfg.max_len
+        if args.batch_size == 32:  # default in parser
+            args.batch_size = export_cfg.batch_size
+        if args.device == "auto":
+            args.device = train_cfg.device
 
     if args.src_file is None or args.ref_file is None:
         parser.error("src_file and ref_file are required (or valid config file)")

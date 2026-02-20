@@ -6,30 +6,31 @@ model:
   ffn_dim: 2048
   max_len: 256
   vocab_size: 20000
-train:
-  experiment_name: "faen-small"
+  activation: "gelu"
+
+data:
   src_lang: "fa"
   tgt_lang: "en"
   src_train_path: "data/train.fa"
   tgt_train_path: "data/train.en"
   src_dev_path: "data/dev.fa"
   tgt_dev_path: "data/dev.en"
-  aim_repo: "~/mt/.aim"
   max_tokens_per_batch: 10000
   buffer_size: 150000
   num_workers: 4
+
+train:
+  experiment_name: "faen-small"
+  aim_repo: "~/mt/.aim"
   lr: 8.5e-4
   accum_steps: 12
   warmup_steps: 5000
   max_steps: 200000
   eval_steps: 2500
   max_checkpoints: 4
+  precision: "bf16"
 
 export:
-  model_path: "faen-small/averaged_model.pt"
-  output_dir: "faen-small/ct2_model"
+  k: 4
+  export_int8: false
   quantization: "int8"
-  k: 3
-  output_prefix: "faen-small/averaged_model"
-  export_int8: true
-  calib_batches: 200

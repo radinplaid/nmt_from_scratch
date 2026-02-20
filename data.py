@@ -3,6 +3,7 @@ import torch
 import itertools
 import random
 from torch.utils.data import DataLoader, IterableDataset
+import sentencepiece as spm
 
 
 class StreamingTextDataset(IterableDataset):
@@ -19,6 +20,9 @@ class StreamingTextDataset(IterableDataset):
         tgt_sp,
         max_tokens: int,
         buffer_size: int = 10000,
+        max_seq_len: int = 256,
+        pad_id: int = 0,
+        pad_multiple: int = 16,
     ):
         self.src_file = src_file
         self.tgt_file = tgt_file
@@ -28,6 +32,9 @@ class StreamingTextDataset(IterableDataset):
         self.buffer_size = max(
             buffer_size, 20000
         )  # Ensure minimum buffer size for better shuffling
+        self.max_seq_len = max_seq_len
+        self.pad_id = pad_id
+        self.pad_multiple = pad_multiple
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -54,7 +61,10 @@ class StreamingTextDataset(IterableDataset):
                     t_ids = self.tgt_sp.encode(
                         t.strip(), out_type=int, add_bos=True, add_eos=True
                     )
-                    if len(s_ids) <= 256 and len(t_ids) <= 256:
+                    if (
+                        len(s_ids) <= self.max_seq_len
+                        and len(t_ids) <= self.max_seq_len
+                    ):
                         yield torch.tensor(s_ids), torch.tensor(t_ids)
 
             samples = get_samples()
@@ -100,25 +110,25 @@ class StreamingTextDataset(IterableDataset):
 
     def _collate(self, srcs, tgts):
         src_padded = torch.nn.utils.rnn.pad_sequence(
-            srcs, batch_first=True, padding_value=0
+            srcs, batch_first=True, padding_value=self.pad_id
         )
         tgt_padded = torch.nn.utils.rnn.pad_sequence(
-            tgts, batch_first=True, padding_value=0
+            tgts, batch_first=True, padding_value=self.pad_id
         )
 
-        # Pad to multiple of 16 for Tensor Core efficiency
-        # For src: straight multiple of 16
+        # Pad to multiple for Tensor Core efficiency
         def pad_to_multiple(tensor, multiple=16, extra=0):
             seq_len = tensor.size(1)
             target_len = ((seq_len + multiple - 1) // multiple) * multiple + extra
             padding = target_len - seq_len
             if padding > 0:
-                tensor = torch.nn.functional.pad(tensor, (0, padding))
+                tensor = torch.nn.functional.pad(
+                    tensor, (0, padding), value=self.pad_id
+                )
             return tensor
 
-        src_padded = pad_to_multiple(src_padded, 16, extra=0)
-        # For tgt: multiple of 16. Slice will be 8N-1. Safe and standard.
-        tgt_padded = pad_to_multiple(tgt_padded, 16, extra=0)
+        src_padded = pad_to_multiple(src_padded, self.pad_multiple, extra=0)
+        tgt_padded = pad_to_multiple(tgt_padded, self.pad_multiple, extra=0)
 
         return src_padded, tgt_padded
 
@@ -155,42 +165,40 @@ def collate_fn(batch):
 
 
 # ... tokenizer code ...
-def train_tokenizer(text_file: str, model_prefix: str, vocab_size: int):
-    import sentencepiece as spm
-
-    # Inspect data size to prevent SentencePiece error on tiny data
-    with open(text_file, "r") as f:
-        line_count = sum(1 for _ in f)
-
-    real_vocab_size = vocab_size
-    if line_count < vocab_size:
-        real_vocab_size = max(10, line_count * 5)
-        if real_vocab_size > vocab_size:
-            real_vocab_size = vocab_size
+def train_tokenizer(
+    text_file: str,
+    model_prefix: str,
+    vocab_size: int,
+    char_coverage: float = 0.9999,
+    input_sentence_size: int = 5_000_000,
+    pad_id: int = 0,
+    unk_id: int = 1,
+    bos_id: int = 2,
+    eos_id: int = 3,
+):
 
     spm.SentencePieceTrainer.train(
         input=text_file,
         model_prefix=model_prefix,
-        vocab_size=real_vocab_size,
-        character_coverage=0.9999,
+        vocab_size=vocab_size,
+        character_coverage=char_coverage,
         model_type="unigram",
-        pad_id=0,
-        unk_id=1,
-        bos_id=2,
-        eos_id=3,
+        pad_id=pad_id,
+        unk_id=unk_id,
+        bos_id=bos_id,
+        eos_id=eos_id,
         pad_piece="<pad>",
         unk_piece="<unk>",
         bos_piece="<s>",
         eos_piece="</s>",
         byte_fallback=True,
-        input_sentence_size=5_000_000,
+        input_sentence_size=input_sentence_size,
         shuffle_input_sentence=True,
     )
     print(f"Tokenizer trained: {model_prefix}.model")
 
 
 def load_tokenizers(src_prefix: str, tgt_prefix: str):
-    import sentencepiece as spm
 
     src_sp = spm.SentencePieceProcessor()
     src_sp.load(f"{src_prefix}.model")
@@ -238,60 +246,84 @@ def load_file_lines(path, limit=None):
     return lines
 
 
-def PrepareData(model_cfg, train_cfg):
+def PrepareData(model_cfg, data_cfg, train_cfg):
     # 1. Train Tokenizers (if not exists)
     vocab_size = model_cfg.vocab_size
-    model_prefix_src = "tokenizer_src"
-    model_prefix_tgt = "tokenizer_tgt"
+    model_prefix_src = data_cfg.tokenizer_prefix_src
+    model_prefix_tgt = data_cfg.tokenizer_prefix_tgt
+
+    os.makedirs(data_cfg.experiment_name, exist_ok=True)
 
     if not os.path.exists(f"{model_prefix_src}.model"):
         print("Training Source Tokenizer...")
-        train_tokenizer(train_cfg.src_train_path, model_prefix_src, vocab_size)
+        train_tokenizer(
+            data_cfg.src_train_path,
+            model_prefix_src,
+            vocab_size,
+            char_coverage=data_cfg.char_coverage,
+            input_sentence_size=data_cfg.input_sentence_size,
+            pad_id=model_cfg.pad_id,
+            unk_id=model_cfg.unk_id,
+            bos_id=model_cfg.bos_id,
+            eos_id=model_cfg.eos_id,
+        )
 
     if not os.path.exists(f"{model_prefix_tgt}.model"):
         print("Training Target Tokenizer...")
-        train_tokenizer(train_cfg.tgt_train_path, model_prefix_tgt, vocab_size)
+        train_tokenizer(
+            data_cfg.tgt_train_path,
+            model_prefix_tgt,
+            vocab_size,
+            char_coverage=data_cfg.char_coverage,
+            input_sentence_size=data_cfg.input_sentence_size,
+            pad_id=model_cfg.pad_id,
+            unk_id=model_cfg.unk_id,
+            bos_id=model_cfg.bos_id,
+            eos_id=model_cfg.eos_id,
+        )
 
     # 2. Load Tokenizers
     src_sp, tgt_sp = load_tokenizers(model_prefix_src, model_prefix_tgt)
 
     # 3. Create Streaming Datasets
     print("Initializing Streaming Datasets...")
-    max_tokens = getattr(train_cfg, "max_tokens_per_batch", 1024)
+    max_tokens = data_cfg.max_tokens_per_batch
 
     train_dataset = StreamingTextDataset(
-        train_cfg.src_train_path,
-        train_cfg.tgt_train_path,
+        data_cfg.src_train_path,
+        data_cfg.tgt_train_path,
         src_sp,
         tgt_sp,
         max_tokens,
-        buffer_size=train_cfg.buffer_size,
+        buffer_size=data_cfg.buffer_size,
+        max_seq_len=data_cfg.max_seq_len,
+        pad_id=model_cfg.pad_id,
+        pad_multiple=data_cfg.pad_multiple,
     )
 
     dev_dataset = StreamingTextDataset(
-        train_cfg.src_dev_path,
-        train_cfg.tgt_dev_path,
+        data_cfg.src_dev_path,
+        data_cfg.tgt_dev_path,
         src_sp,
         tgt_sp,
         max_tokens,
-        buffer_size=train_cfg.buffer_size // 10,  # Smaller buffer for dev
+        buffer_size=data_cfg.buffer_size // 10,  # Smaller buffer for dev
+        max_seq_len=data_cfg.max_seq_len,
+        pad_id=model_cfg.pad_id,
+        pad_multiple=data_cfg.pad_multiple,
     )
 
     # 4. Loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=None,
-        num_workers=train_cfg.num_workers,
+        num_workers=data_cfg.num_workers,
         pin_memory=True,
-        prefetch_factor=64
-        if train_cfg.num_workers > 0
-        else None,  # Increase prefetch for higher throughput
-        persistent_workers=True if train_cfg.num_workers > 0 else False,
-        multiprocessing_context="spawn" if train_cfg.num_workers > 0 else None,
+        prefetch_factor=data_cfg.prefetch_factor if data_cfg.num_workers > 0 else None,
+        persistent_workers=True if data_cfg.num_workers > 0 else False,
+        multiprocessing_context="spawn" if data_cfg.num_workers > 0 else None,
     )
 
-    # We use num_workers=0 for dev for simplicity/stability in metrics calculation
-    # Disable pin_memory for validation to reduce memory usage
     dev_loader = DataLoader(
         dev_dataset, batch_size=None, num_workers=0, pin_memory=False
     )
