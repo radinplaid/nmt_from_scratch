@@ -53,6 +53,7 @@ This is a start but there is still some work to be done:
 * The `generate` and `beam_search` methods in `model.py` does not seem to be implemented correctly
 * All model files (tokenizers vocab files etc) should be stored in a single model run directory (maybe named after the experiment)
 * Rather than truncating inputs that are too long, the dataloader should probably drop/ignore them
+* Add code to resume training from checkpoint
 * ... etc
 
 
