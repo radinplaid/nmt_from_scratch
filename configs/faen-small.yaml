@@ -1,11 +1,11 @@
 model:
-  d_model: 384
-  enc_layers: 10
+  d_model: 512
+  enc_layers: 8
   dec_layers: 2
   n_heads: 8
   ffn_dim: 2048
   max_len: 256
-  vocab_size: 20000
+  vocab_size: 10000
   activation: "gelu"
 
 data:
@@ -25,7 +25,7 @@ train:
   lr: 8.5e-4
   accum_steps: 12
   warmup_steps: 5000
-  max_steps: 200000
+  max_steps: 100000
   eval_steps: 2500
   max_checkpoints: 4
   precision: "bf16"

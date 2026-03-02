@@ -61,16 +61,16 @@ This is a start but there is still some work to be done:
 
 ```bash
 # Edit config to your liking
-vim configs/faen-tiny.yaml
+vim configs/faen-small.yaml
 
 # Train
-python train.py --config configs/faen-tiny.yaml 
+python train.py --config configs/faen-small.yaml 
 
 # Average checkpoints and quantize the model
-python average_checkpoints.py --config configs/faen-tiny.yaml
+python average_checkpoints.py --config configs/faen-small.yaml
 
 # Convert to CTranslate2 format
-python convert_to_ct2.py --config configs/faen-tiny.yaml
+python convert_to_ct2.py --config configs/faen-small.yaml
 
 # Evaluate (uses quickmt library, https://github.com/quickmt/quickmt)
 python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cuda --batch_size 8 --beam_size 5 --model ./faen-small/exported_model

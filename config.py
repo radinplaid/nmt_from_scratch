@@ -43,7 +43,7 @@ class DataConfig:
 
     # Tokenizer
     char_coverage: float = 0.9999
-    input_sentence_size: int = 5_000_000
+    input_sentence_size: int = 1_000_000
 
     @property
     def tokenizer_prefix_src(self) -> str:

@@ -61,6 +61,8 @@ class StreamingTextDataset(IterableDataset):
                     t_ids = self.tgt_sp.encode(
                         t.strip(), out_type=int, add_bos=True, add_eos=True
                     )
+
+                    # If either sequence is too long, drop it
                     if (
                         len(s_ids) <= self.max_seq_len
                         and len(t_ids) <= self.max_seq_len
@@ -136,7 +138,7 @@ class StreamingTextDataset(IterableDataset):
 def collate_fn(batch):
     """
     Custom collate to pad to the max length *in this batch*.
-    Ensures length is a multiple of 16 for Tensor Core efficiency.
+    Ensures length is a multiple of 16 for efficiency.
     batch is list of (src_tensor, tgt_tensor)
     """
     srcs, tgts = zip(*batch)
@@ -164,13 +166,12 @@ def collate_fn(batch):
     return src_padded, tgt_padded
 
 
-# ... tokenizer code ...
 def train_tokenizer(
     text_file: str,
     model_prefix: str,
     vocab_size: int,
-    char_coverage: float = 0.9999,
-    input_sentence_size: int = 5_000_000,
+    char_coverage: float,
+    input_sentence_size: int,
     pad_id: int = 0,
     unk_id: int = 1,
     bos_id: int = 2,
@@ -198,12 +199,23 @@ def train_tokenizer(
     print(f"Tokenizer trained: {model_prefix}.model")
 
 
-def load_tokenizers(src_prefix: str, tgt_prefix: str):
+def load_tokenizers(src_prefix: str, tgt_prefix: str, expected_vocab_size: int = None):
 
     src_sp = spm.SentencePieceProcessor()
     src_sp.load(f"{src_prefix}.model")
     tgt_sp = spm.SentencePieceProcessor()
     tgt_sp.load(f"{tgt_prefix}.model")
+
+    if expected_vocab_size is not None:
+        if src_sp.get_piece_size() != expected_vocab_size:
+            raise ValueError(
+                f"Source Vocabulary size mismatch: expected {expected_vocab_size}, got {src_sp.get_piece_size()}"
+            )
+        if tgt_sp.get_piece_size() != expected_vocab_size:
+            raise ValueError(
+                f"Target Vocabulary size mismatch: expected {expected_vocab_size}, got {tgt_sp.get_piece_size()}"
+            )
+
     return src_sp, tgt_sp
 
 
@@ -283,7 +295,9 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
         )
 
     # 2. Load Tokenizers
-    src_sp, tgt_sp = load_tokenizers(model_prefix_src, model_prefix_tgt)
+    src_sp, tgt_sp = load_tokenizers(
+        model_prefix_src, model_prefix_tgt, expected_vocab_size=vocab_size
+    )
 
     # 3. Create Streaming Datasets
     print("Initializing Streaming Datasets...")
