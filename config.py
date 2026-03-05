@@ -16,6 +16,8 @@ class ModelConfig:
     vocab_size: int = 32000
     activation: str = "gelu"
     use_checkpoint: bool = False
+    ff_bias: bool = False
+    mlp_type: str = "standard"  # "standard" or "gated"
 
     # Special Tokens
     pad_id: int = 0
@@ -43,7 +45,7 @@ class DataConfig:
 
     # Tokenizer
     char_coverage: float = 0.9999
-    input_sentence_size: int = 1_000_000
+    input_sentence_size: int = 5_000_000
 
     @property
     def tokenizer_prefix_src(self) -> str:

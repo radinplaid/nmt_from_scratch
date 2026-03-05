@@ -6,7 +6,8 @@ model:
   ffn_dim: 2048
   max_len: 256
   vocab_size: 10000
-  activation: "gelu"
+  mlp_type: "gated"
+  activation: "silu"
 
 data:
   src_lang: "fa"

@@ -44,7 +44,12 @@ def get_layer_weights(state_dict, prefix):
 
 def set_linear(spec, state_dict, prefix):
     """Set weights and bias for a CT2 LinearSpec."""
-    spec.weight, spec.bias = get_layer_weights(state_dict, prefix)
+    weight, bias = get_layer_weights(state_dict, prefix)
+    spec.weight = weight
+    if bias is not None:
+        spec.bias = bias
+    elif weight is not None:
+        spec.bias = np.zeros(weight.shape[0], dtype=np.float32)
 
 
 def set_layer_norm(spec, state_dict, prefix):
@@ -66,6 +71,13 @@ def set_layer_norm(spec, state_dict, prefix):
             spec.beta = bias.detach().float().cpu().numpy()
         else:
             spec.beta = bias.numpy()
+    elif weight is not None:
+        # Fill with zeros if bias is missing
+        if hasattr(weight, "detach"):
+            w = weight.detach().float().cpu().numpy()
+        else:
+            w = weight.numpy()
+        spec.beta = np.zeros(w.shape[0], dtype=np.float32)
 
 
 def _make_sinusoidal_position_encodings(max_len, d_model):
@@ -113,16 +125,28 @@ def set_multihead_attention(spec, state_dict, prefix, self_attention=True):
     if self_attention:
         # linear[0] is in_proj
         spec.linear[0].weight = in_proj_weight
-        spec.linear[0].bias = in_proj_bias
+        if in_proj_bias is not None:
+            spec.linear[0].bias = in_proj_bias
+        elif in_proj_weight is not None:
+            spec.linear[0].bias = np.zeros(in_proj_weight.shape[0], dtype=np.float32)
+
         # linear[1] is out_proj
         spec.linear[1].weight = out_proj_weight
-        spec.linear[1].bias = out_proj_bias
+        if out_proj_bias is not None:
+            spec.linear[1].bias = out_proj_bias
+        elif out_proj_weight is not None:
+            spec.linear[1].bias = np.zeros(out_proj_weight.shape[0], dtype=np.float32)
     else:
         # linear[0] is query_proj
         # linear[1] is kv_proj (fused)
         # linear[2] is out_proj
         q, k, v = np.split(in_proj_weight, 3)
-        qb, kb, vb = np.split(in_proj_bias, 3)
+        if in_proj_bias is not None:
+            qb, kb, vb = np.split(in_proj_bias, 3)
+        else:
+            qb = np.zeros(q.shape[0], dtype=np.float32)
+            kb = np.zeros(k.shape[0], dtype=np.float32)
+            vb = np.zeros(v.shape[0], dtype=np.float32)
 
         spec.linear[0].weight = q
         spec.linear[0].bias = qb
@@ -131,7 +155,10 @@ def set_multihead_attention(spec, state_dict, prefix, self_attention=True):
         spec.linear[1].bias = np.concatenate([kb, vb], axis=0)
 
         spec.linear[2].weight = out_proj_weight
-        spec.linear[2].bias = out_proj_bias
+        if out_proj_bias is not None:
+            spec.linear[2].bias = out_proj_bias
+        elif out_proj_weight is not None:
+            spec.linear[2].bias = np.zeros(out_proj_weight.shape[0], dtype=np.float32)
 
 
 def convert_vocab(sp_vocab_path):
@@ -169,27 +196,31 @@ def main():
         new_state_dict[new_key] = v
     state_dict = new_state_dict
 
-    # 2. Initialize Specs
     activation_map = {
         "gelu": ctranslate2.specs.Activation.GELU,
         "relu": ctranslate2.specs.Activation.RELU,
         "swish": ctranslate2.specs.Activation.SWISH,
+        "silu": ctranslate2.specs.Activation.SWISH,
     }
     ct2_activation = activation_map.get(
         model_cfg.activation, ctranslate2.specs.Activation.GELU
     )
+
+    is_gated = getattr(model_cfg, "mlp_type", "standard") == "gated"
 
     encoder_spec = ctranslate2.specs.TransformerEncoderSpec(
         num_layers=model_cfg.enc_layers,
         num_heads=model_cfg.n_heads,
         pre_norm=True,
         activation=ct2_activation,
+        ffn_glu=is_gated,
     )
     decoder_spec = ctranslate2.specs.TransformerDecoderSpec(
         num_layers=model_cfg.dec_layers,
         num_heads=model_cfg.n_heads,
         pre_norm=True,
         activation=ct2_activation,
+        ffn_glu=is_gated,
     )
 
     # ... mapping ...
@@ -239,8 +270,29 @@ def main():
             layer_spec.self_attention.layer_norm, state_dict, f"{prefix}.norm1"
         )
 
-        set_linear(layer_spec.ffn.linear_0, state_dict, f"{prefix}.linear1")
-        set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.linear2")
+        if is_gated:
+            # gate_up_proj is fused [gate, up]
+            weight, bias = get_layer_weights(state_dict, f"{prefix}.ffn.gate_up_proj")
+            gate_w, up_w = np.split(weight, 2, axis=0)
+            layer_spec.ffn.linear_0.weight = gate_w
+            layer_spec.ffn.linear_0_noact.weight = up_w
+
+            if bias is not None:
+                gate_b, up_b = np.split(bias, 2)
+                layer_spec.ffn.linear_0.bias = gate_b
+                layer_spec.ffn.linear_0_noact.bias = up_b
+            else:
+                layer_spec.ffn.linear_0.bias = np.zeros(
+                    gate_w.shape[0], dtype=np.float32
+                )
+                layer_spec.ffn.linear_0_noact.bias = np.zeros(
+                    up_w.shape[0], dtype=np.float32
+                )
+
+            set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.ffn.down_proj")
+        else:
+            set_linear(layer_spec.ffn.linear_0, state_dict, f"{prefix}.ffn.linear1")
+            set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.ffn.linear2")
         set_layer_norm(layer_spec.ffn.layer_norm, state_dict, f"{prefix}.norm2")
 
     # Final Encoder Norm
@@ -269,8 +321,29 @@ def main():
         )
         set_layer_norm(layer_spec.attention.layer_norm, state_dict, f"{prefix}.norm2")
 
-        set_linear(layer_spec.ffn.linear_0, state_dict, f"{prefix}.linear1")
-        set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.linear2")
+        if is_gated:
+            # gate_up_proj is fused [gate, up]
+            weight, bias = get_layer_weights(state_dict, f"{prefix}.ffn.gate_up_proj")
+            gate_w, up_w = np.split(weight, 2, axis=0)
+            layer_spec.ffn.linear_0.weight = gate_w
+            layer_spec.ffn.linear_0_noact.weight = up_w
+
+            if bias is not None:
+                gate_b, up_b = np.split(bias, 2)
+                layer_spec.ffn.linear_0.bias = gate_b
+                layer_spec.ffn.linear_0_noact.bias = up_b
+            else:
+                layer_spec.ffn.linear_0.bias = np.zeros(
+                    gate_w.shape[0], dtype=np.float32
+                )
+                layer_spec.ffn.linear_0_noact.bias = np.zeros(
+                    up_w.shape[0], dtype=np.float32
+                )
+
+            set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.ffn.down_proj")
+        else:
+            set_linear(layer_spec.ffn.linear_0, state_dict, f"{prefix}.ffn.linear1")
+            set_linear(layer_spec.ffn.linear_1, state_dict, f"{prefix}.ffn.linear2")
         set_layer_norm(layer_spec.ffn.layer_norm, state_dict, f"{prefix}.norm3")
 
     # Final Decoder Norm

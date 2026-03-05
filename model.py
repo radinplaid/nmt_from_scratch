@@ -34,6 +34,154 @@ class TokenEmbedding(nn.Module):
         return self.embedding(tokens.long()) * math.sqrt(self.d_model)
 
 
+class FeedForward(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        ffn_dim,
+        dropout=0.1,
+        activation="gelu",
+        bias=False,
+        mlp_type="standard",
+    ):
+        super().__init__()
+        self.mlp_type = mlp_type
+        if mlp_type == "gated":
+            self.gate_up_proj = nn.Linear(d_model, 2 * ffn_dim, bias=bias)
+            self.down_proj = nn.Linear(ffn_dim, d_model, bias=bias)
+        else:
+            self.linear1 = nn.Linear(d_model, ffn_dim, bias=bias)
+            self.linear2 = nn.Linear(ffn_dim, d_model, bias=bias)
+
+        if activation == "gelu":
+            self.act = nn.GELU()
+        elif activation == "silu" or activation == "swish":
+            self.act = nn.SiLU()
+        else:
+            self.act = nn.ReLU()
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        if self.mlp_type == "gated":
+            gate_up = self.gate_up_proj(x)
+            gate, up = gate_up.chunk(2, dim=-1)
+            x = self.act(gate) * up
+            x = self.dropout(x)
+            x = self.down_proj(x)
+        else:
+            x = self.act(self.linear1(x))
+            x = self.dropout(x)
+            x = self.linear2(x)
+        return x
+
+
+class EncoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        nhead,
+        ffn_dim,
+        dropout=0.1,
+        activation="gelu",
+        bias=False,
+        mlp_type="standard",
+    ):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+        )
+        self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
+        self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
+        self.norm2 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        # Pre-norm
+        x = self.norm1(src)
+        x = self.self_attn(
+            x,
+            x,
+            x,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=False,
+        )[0]
+        src = src + self.dropout(x)
+
+        x = self.norm2(src)
+        x = self.ffn(x)
+        src = src + self.dropout(x)
+        return src
+
+
+class DecoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        nhead,
+        ffn_dim,
+        dropout=0.1,
+        activation="gelu",
+        bias=False,
+        mlp_type="standard",
+    ):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+        )
+        self.multihead_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+        )
+        self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
+        self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
+        self.norm2 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
+        self.norm3 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        tgt,
+        memory,
+        tgt_mask=None,
+        memory_mask=None,
+        tgt_key_padding_mask=None,
+        memory_key_padding_mask=None,
+        tgt_is_causal=False,
+        memory_is_causal=False,
+    ):
+        # Pre-norm
+        x = self.norm1(tgt)
+        # Self attention
+        x = self.self_attn(
+            x,
+            x,
+            x,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+            need_weights=False,
+        )[0]
+        tgt = tgt + self.dropout(x)
+
+        # Cross attention
+        x = self.norm2(tgt)
+        x = self.multihead_attn(
+            x,
+            memory,
+            memory,
+            attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask,
+            need_weights=False,
+        )[0]
+        tgt = tgt + self.dropout(x)
+
+        # FFN
+        x = self.norm3(tgt)
+        x = self.ffn(x)
+        tgt = tgt + self.dropout(x)
+        return tgt
+
+
 class Seq2SeqTransformer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -45,37 +193,39 @@ class Seq2SeqTransformer(nn.Module):
             config.d_model, dropout=config.dropout, max_len=config.max_len
         )
 
-        encoder_layer = nn.TransformerEncoderLayer(
+        encoder_layer = EncoderLayer(
             d_model=config.d_model,
             nhead=config.n_heads,
-            dim_feedforward=config.ffn_dim,
+            ffn_dim=config.ffn_dim,
             dropout=config.dropout,
-            batch_first=True,
-            norm_first=True,  # Pre-norm performs better
             activation=config.activation,
+            bias=config.ff_bias,
+            mlp_type=config.mlp_type,
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=config.enc_layers,
-            norm=nn.LayerNorm(config.d_model),
+            norm=nn.LayerNorm(config.d_model, eps=1e-6, bias=config.ff_bias),
         )
 
-        decoder_layer = nn.TransformerDecoderLayer(
+        decoder_layer = DecoderLayer(
             d_model=config.d_model,
             nhead=config.n_heads,
-            dim_feedforward=config.ffn_dim,
+            ffn_dim=config.ffn_dim,
             dropout=config.dropout,
-            batch_first=True,
-            norm_first=True,
             activation=config.activation,
+            bias=config.ff_bias,
+            mlp_type=config.mlp_type,
         )
         self.decoder = nn.TransformerDecoder(
             decoder_layer,
             num_layers=config.dec_layers,
-            norm=nn.LayerNorm(config.d_model),
+            norm=nn.LayerNorm(config.d_model, eps=1e-6, bias=config.ff_bias),
         )
 
-        self.generator = nn.Linear(config.d_model, config.vocab_size)
+        self.generator = nn.Linear(
+            config.d_model, config.vocab_size, bias=config.ff_bias
+        )
 
         # Initialize parameters
         for p in self.parameters():
