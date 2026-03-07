@@ -7,7 +7,7 @@ model:
   max_len: 256
   vocab_size: 10000
   mlp_type: "gated"
-  activation: "silu"
+  activation: "gelu"
 
 data:
   src_lang: "fa"
@@ -23,7 +23,7 @@ data:
 train:
   experiment_name: "faen-small"
   aim_repo: "~/mt/.aim"
-  lr: 8.5e-4
+  lr: 1.0e-3
   accum_steps: 12
   warmup_steps: 5000
   max_steps: 100000
