@@ -90,75 +90,78 @@ def _make_sinusoidal_position_encodings(max_len, d_model):
     return pe
 
 
-def set_multihead_attention(spec, state_dict, prefix, self_attention=True):
-    """Set weights for a CT2 MultiHeadAttentionSpec from PyTorch MultiheadAttention."""
-    in_proj_weight = state_dict.get(f"{prefix}.in_proj_weight")
-    in_proj_bias = state_dict.get(f"{prefix}.in_proj_bias")
-    out_proj_weight = state_dict.get(f"{prefix}.out_proj.weight")
-    out_proj_bias = state_dict.get(f"{prefix}.out_proj.bias")
+def set_multihead_attention(
+    spec, state_dict, prefix, self_attention=True, n_kv_heads=None, n_heads=None
+):
+    """Map a ``GroupedQueryAttention`` module's weights onto a CT2 attention spec.
 
-    if in_proj_weight is not None:
-        in_proj_weight = (
-            in_proj_weight.detach().float().cpu().numpy()
-            if hasattr(in_proj_weight, "detach")
-            else in_proj_weight.numpy()
-        )
-    if in_proj_bias is not None:
-        in_proj_bias = (
-            in_proj_bias.detach().float().cpu().numpy()
-            if hasattr(in_proj_bias, "detach")
-            else in_proj_bias.numpy()
-        )
-    if out_proj_weight is not None:
-        out_proj_weight = (
-            out_proj_weight.detach().float().cpu().numpy()
-            if hasattr(out_proj_weight, "detach")
-            else out_proj_weight.numpy()
-        )
-    if out_proj_bias is not None:
-        out_proj_bias = (
-            out_proj_bias.detach().float().cpu().numpy()
-            if hasattr(out_proj_bias, "detach")
-            else out_proj_bias.numpy()
-        )
+    Weight keys expected in ``state_dict`` (relative to ``prefix``):
+        ``q_proj.weight``  / ``q_proj.bias``
+        ``kv_proj.weight`` / ``kv_proj.bias``   (fused K and V)
+        ``out_proj.weight`` / ``out_proj.bias``
+
+    CTranslate2 self-attention layout when ``n_kv_heads == n_heads`` (standard MHA):
+        ``linear[0]`` = fused QKV  ``(3 * d, d)``
+        ``linear[1]`` = out_proj   ``(d, d)``
+
+    CTranslate2 self-attention layout when ``n_kv_heads < n_heads`` (GQA / MQA),
+    and *all* cross-attention regardless of group count:
+        ``linear[0]`` = q_proj    ``(n_heads    * head_dim, d)``
+        ``linear[1]`` = kv_proj   ``(2 * n_kv_heads * head_dim, d)``  – fused K+V
+        ``linear[2]`` = out_proj  ``(d, n_heads * head_dim)``
+    """
+
+    def to_np(t):
+        if t is None:
+            return None
+        return t.detach().float().cpu().numpy() if hasattr(t, "detach") else np.array(t)
+
+    q_w = to_np(state_dict.get(f"{prefix}.q_proj.weight"))
+    kv_w = to_np(state_dict.get(f"{prefix}.kv_proj.weight"))
+    o_w = to_np(state_dict.get(f"{prefix}.out_proj.weight"))
+    q_b = to_np(state_dict.get(f"{prefix}.q_proj.bias"))
+    kv_b = to_np(state_dict.get(f"{prefix}.kv_proj.bias"))
+    o_b = to_np(state_dict.get(f"{prefix}.out_proj.bias"))
+
+    def zeros(arr):
+        return np.zeros(arr.shape[0], dtype=np.float32)
 
     if self_attention:
-        # linear[0] is in_proj
-        spec.linear[0].weight = in_proj_weight
-        if in_proj_bias is not None:
-            spec.linear[0].bias = in_proj_bias
-        elif in_proj_weight is not None:
-            spec.linear[0].bias = np.zeros(in_proj_weight.shape[0], dtype=np.float32)
-
-        # linear[1] is out_proj
-        spec.linear[1].weight = out_proj_weight
-        if out_proj_bias is not None:
-            spec.linear[1].bias = out_proj_bias
-        elif out_proj_weight is not None:
-            spec.linear[1].bias = np.zeros(out_proj_weight.shape[0], dtype=np.float32)
-    else:
-        # linear[0] is query_proj
-        # linear[1] is kv_proj (fused)
-        # linear[2] is out_proj
-        q, k, v = np.split(in_proj_weight, 3)
-        if in_proj_bias is not None:
-            qb, kb, vb = np.split(in_proj_bias, 3)
+        # ---------- Self-attention: always 2 CT2 linears ----------
+        # CT2 self-attention layout is the same whether MHA or GQA:
+        #   linear[0] = fused [Q ; K+V]
+        #     MHA shape: (3 * n_heads * head_dim, d)
+        #     GQA shape: ((n_heads + 2 * n_kv_heads) * head_dim, d)
+        #   linear[1] = out_proj
+        #
+        # q_w:  (n_heads * hd, d)
+        # kv_w: (2 * n_kv_heads * hd, d)
+        qkv_w = np.concatenate([q_w, kv_w], axis=0)
+        spec.linear[0].weight = qkv_w
+        if q_b is not None or kv_b is not None:
+            spec.linear[0].bias = np.concatenate([
+                q_b  if q_b  is not None else np.zeros(q_w.shape[0],  dtype=np.float32),
+                kv_b if kv_b is not None else np.zeros(kv_w.shape[0], dtype=np.float32),
+            ])
         else:
-            qb = np.zeros(q.shape[0], dtype=np.float32)
-            kb = np.zeros(k.shape[0], dtype=np.float32)
-            vb = np.zeros(v.shape[0], dtype=np.float32)
+            spec.linear[0].bias = np.zeros(qkv_w.shape[0], dtype=np.float32)
 
-        spec.linear[0].weight = q
-        spec.linear[0].bias = qb
+        spec.linear[1].weight = o_w
+        spec.linear[1].bias = o_b if o_b is not None else zeros(o_w)
 
-        spec.linear[1].weight = np.concatenate([k, v], axis=0)
-        spec.linear[1].bias = np.concatenate([kb, vb], axis=0)
+    else:
+        # ---------- Cross-attention: always 3 CT2 linears ----------
+        #   linear[0] = q_proj   (n_heads * head_dim, d)
+        #   linear[1] = kv_proj  (2 * n_kv_heads * head_dim, d)  – fused K+V
+        #   linear[2] = out_proj
+        spec.linear[0].weight = q_w
+        spec.linear[0].bias = q_b if q_b is not None else zeros(q_w)
 
-        spec.linear[2].weight = out_proj_weight
-        if out_proj_bias is not None:
-            spec.linear[2].bias = out_proj_bias
-        elif out_proj_weight is not None:
-            spec.linear[2].bias = np.zeros(out_proj_weight.shape[0], dtype=np.float32)
+        spec.linear[1].weight = kv_w
+        spec.linear[1].bias = kv_b if kv_b is not None else zeros(kv_w)
+
+        spec.linear[2].weight = o_w
+        spec.linear[2].bias = o_b if o_b is not None else zeros(o_w)
 
 
 def convert_vocab(sp_vocab_path):
@@ -208,20 +211,32 @@ def main():
 
     is_gated = getattr(model_cfg, "mlp_type", "standard") == "gated"
 
-    encoder_spec = ctranslate2.specs.TransformerEncoderSpec(
+    # Resolve effective n_kv_heads (0 means same as n_heads → standard MHA)
+    n_kv_heads_cfg = getattr(model_cfg, "n_kv_heads", 0)
+    effective_kv_heads = n_kv_heads_cfg if n_kv_heads_cfg > 0 else model_cfg.n_heads
+    is_gqa = effective_kv_heads < model_cfg.n_heads
+
+    enc_kwargs: dict = dict(
         num_layers=model_cfg.enc_layers,
         num_heads=model_cfg.n_heads,
         pre_norm=True,
         activation=ct2_activation,
         ffn_glu=is_gated,
     )
-    decoder_spec = ctranslate2.specs.TransformerDecoderSpec(
+    dec_kwargs: dict = dict(
         num_layers=model_cfg.dec_layers,
         num_heads=model_cfg.n_heads,
         pre_norm=True,
         activation=ct2_activation,
         ffn_glu=is_gated,
     )
+    # num_heads_kv activates GQA/MQA in CTranslate2; only pass when actually using GQA
+    if is_gqa:
+        enc_kwargs["num_heads_kv"] = effective_kv_heads
+        dec_kwargs["num_heads_kv"] = effective_kv_heads
+
+    encoder_spec = ctranslate2.specs.TransformerEncoderSpec(**enc_kwargs)
+    decoder_spec = ctranslate2.specs.TransformerDecoderSpec(**dec_kwargs)
 
     # ... mapping ...
     # Embeddings
@@ -265,6 +280,8 @@ def main():
             state_dict,
             f"{prefix}.self_attn",
             self_attention=True,
+            n_kv_heads=effective_kv_heads,
+            n_heads=model_cfg.n_heads,
         )
         set_layer_norm(
             layer_spec.self_attention.layer_norm, state_dict, f"{prefix}.norm1"
@@ -308,6 +325,8 @@ def main():
             state_dict,
             f"{prefix}.self_attn",
             self_attention=True,
+            n_kv_heads=effective_kv_heads,
+            n_heads=model_cfg.n_heads,
         )
         set_layer_norm(
             layer_spec.self_attention.layer_norm, state_dict, f"{prefix}.norm1"
@@ -318,6 +337,8 @@ def main():
             state_dict,
             f"{prefix}.multihead_attn",
             self_attention=False,
+            n_kv_heads=effective_kv_heads,
+            n_heads=model_cfg.n_heads,
         )
         set_layer_norm(layer_spec.attention.layer_norm, state_dict, f"{prefix}.norm2")
 

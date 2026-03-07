@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 import torch.ao.quantization
+from torch.utils.checkpoint import checkpoint
 
 
 class PositionalEncoding(nn.Module):
@@ -76,6 +78,131 @@ class FeedForward(nn.Module):
         return x
 
 
+class GroupedQueryAttention(nn.Module):
+    """Multi-head attention with optional Grouped Query / Multi-Query support.
+
+    Compatible with CTranslate2's ``num_heads_kv`` parameter.
+
+    * ``n_kv_heads = 0`` or ``n_kv_heads = n_heads`` → standard MHA
+    * ``n_kv_heads = 1``                              → Multi-Query Attention (MQA)
+    * ``1 < n_kv_heads < n_heads``                   → Grouped Query Attention (GQA)
+
+    Uses ``F.scaled_dot_product_attention``, which dispatches to Flash Attention /
+    memory-efficient attention automatically when available.
+
+    CTranslate2-compatible weight layout (separate Q and KV projections):
+        q_proj   : ``(n_heads * head_dim, d_model)``
+        kv_proj  : ``(2 * n_kv_heads * head_dim, d_model)``  – fused K and V
+        out_proj : ``(d_model, n_heads * head_dim)``
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        n_kv_heads: int = 0,
+        dropout: float = 0.1,
+        bias: bool = False,
+    ):
+        super().__init__()
+        n_kv_heads = n_kv_heads if n_kv_heads > 0 else n_heads
+        assert n_heads % n_kv_heads == 0, (
+            f"n_heads ({n_heads}) must be divisible by n_kv_heads ({n_kv_heads})"
+        )
+        assert d_model % n_heads == 0, (
+            f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
+        )
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.n_groups = n_heads // n_kv_heads
+        self.head_dim = d_model // n_heads
+
+        self.q_proj = nn.Linear(d_model, n_heads * self.head_dim, bias=bias)
+        self.kv_proj = nn.Linear(d_model, 2 * n_kv_heads * self.head_dim, bias=bias)
+        self.out_proj = nn.Linear(n_heads * self.head_dim, d_model, bias=bias)
+        self.attn_dropout = dropout
+        # nn.TransformerEncoder / nn.TransformerDecoder inspect this attribute
+        # to determine tensor layout.  We always use batch-first (B, T, d).
+        self.batch_first = True
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_value: torch.Tensor,
+        attn_mask=None,
+        key_padding_mask=None,
+        need_weights: bool = False,
+    ):
+        """
+        Args:
+            query:            ``(B, T, d_model)``
+            key_value:        ``(B, S, d_model)`` – pass *query* for self-attention
+            attn_mask:        optional ``(T, S)`` or ``(B, T, S)`` float **or** bool mask.
+                              Bool convention: ``True`` = mask out (same as
+                              ``nn.MultiheadAttention``).
+            key_padding_mask: optional ``(B, S)`` bool mask, ``True`` = padding position.
+
+        Returns:
+            ``(output, None)`` where output has shape ``(B, T, d_model)``.
+            The ``None`` placeholder keeps the interface identical to
+            ``nn.MultiheadAttention``.
+        """
+        B, T, _ = query.shape
+        S = key_value.size(1)
+
+        q = self.q_proj(query)        # (B, T, H * hd)
+        kv = self.kv_proj(key_value)  # (B, S, 2 * Hkv * hd)
+        k, v = kv.chunk(2, dim=-1)    # each (B, S, Hkv * hd)
+
+        q = q.view(B, T, self.n_heads,    self.head_dim).transpose(1, 2)  # (B, H,   T, hd)
+        k = k.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, S, hd)
+        v = v.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)  # (B, Hkv, S, hd)
+
+        # Expand KV heads for GQA (no-op when n_groups == 1)
+        if self.n_groups > 1:
+            k = k.repeat_interleave(self.n_groups, dim=1)  # (B, H, S, hd)
+            v = v.repeat_interleave(self.n_groups, dim=1)  # (B, H, S, hd)
+
+        # Build a merged float mask from the optional attn_mask + key_padding_mask.
+        # Both follow the nn.MultiheadAttention convention: True = mask out.
+        merged_mask = None
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                merged_mask = torch.zeros(
+                    attn_mask.shape, dtype=q.dtype, device=q.device
+                ).masked_fill_(attn_mask, float("-inf"))
+            else:
+                merged_mask = attn_mask.to(dtype=q.dtype)
+            # Promote to 4-D so it broadcasts over (B, H, T, S)
+            if merged_mask.dim() == 2:
+                merged_mask = merged_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, S)
+            elif merged_mask.dim() == 3:
+                merged_mask = merged_mask.unsqueeze(1)               # (B, 1, T, S)
+
+        if key_padding_mask is not None:
+            # nn.TransformerEncoder (PyTorch ≥ 2.0) may pre-convert the bool mask
+            # to a float additive mask (shape B×S, -inf where padding).
+            # We must handle both bool and float inputs.
+            if key_padding_mask.dtype == torch.bool:
+                kpm = torch.zeros(
+                    B, 1, 1, S, dtype=q.dtype, device=q.device
+                ).masked_fill_(key_padding_mask.view(B, 1, 1, S), float("-inf"))
+            else:
+                # Already a float additive mask; just reshape for broadcasting
+                kpm = key_padding_mask.to(dtype=q.dtype).view(B, 1, 1, S)
+            merged_mask = kpm if merged_mask is None else merged_mask + kpm
+
+        # F.scaled_dot_product_attention dispatches to Flash Attention when available
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=merged_mask,
+            dropout_p=self.attn_dropout if self.training else 0.0,
+        )  # (B, H, T, hd)
+
+        out = out.transpose(1, 2).contiguous().view(B, T, self.n_heads * self.head_dim)
+        return self.out_proj(out), None  # None: no attention weights returned
+
+
 class EncoderLayer(nn.Module):
     def __init__(
         self,
@@ -86,10 +213,11 @@ class EncoderLayer(nn.Module):
         activation="gelu",
         bias=False,
         mlp_type="standard",
+        n_kv_heads=0,
     ):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+        self.self_attn = GroupedQueryAttention(
+            d_model, nhead, n_kv_heads=n_kv_heads, dropout=dropout, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
         self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
@@ -100,12 +228,9 @@ class EncoderLayer(nn.Module):
         # Pre-norm
         x = self.norm1(src)
         x = self.self_attn(
-            x,
-            x,
-            x,
+            x, x,
             attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask,
-            need_weights=False,
         )[0]
         src = src + self.dropout(x)
 
@@ -125,13 +250,16 @@ class DecoderLayer(nn.Module):
         activation="gelu",
         bias=False,
         mlp_type="standard",
+        n_kv_heads=0,
     ):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+        self.self_attn = GroupedQueryAttention(
+            d_model, nhead, n_kv_heads=n_kv_heads, dropout=dropout, bias=bias
         )
-        self.multihead_attn = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+        # "multihead_attn" is kept as the attribute name to preserve state-dict keys
+        # that the CTranslate2 converter already knows about.
+        self.multihead_attn = GroupedQueryAttention(
+            d_model, nhead, n_kv_heads=n_kv_heads, dropout=dropout, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
         self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
@@ -150,28 +278,21 @@ class DecoderLayer(nn.Module):
         tgt_is_causal=False,
         memory_is_causal=False,
     ):
-        # Pre-norm
+        # Pre-norm self-attention (causal)
         x = self.norm1(tgt)
-        # Self attention
         x = self.self_attn(
-            x,
-            x,
-            x,
+            x, x,
             attn_mask=tgt_mask,
             key_padding_mask=tgt_key_padding_mask,
-            need_weights=False,
         )[0]
         tgt = tgt + self.dropout(x)
 
-        # Cross attention
+        # Cross-attention (query from decoder, key/value from encoder memory)
         x = self.norm2(tgt)
         x = self.multihead_attn(
-            x,
-            memory,
-            memory,
+            x, memory,
             attn_mask=memory_mask,
             key_padding_mask=memory_key_padding_mask,
-            need_weights=False,
         )[0]
         tgt = tgt + self.dropout(x)
 
@@ -193,32 +314,32 @@ class Seq2SeqTransformer(nn.Module):
             config.d_model, dropout=config.dropout, max_len=config.max_len
         )
 
-        encoder_layer = EncoderLayer(
-            d_model=config.d_model,
-            nhead=config.n_heads,
-            ffn_dim=config.ffn_dim,
-            dropout=config.dropout,
-            activation=config.activation,
-            bias=config.ff_bias,
-            mlp_type=config.mlp_type,
-        )
+        n_kv_heads = getattr(config, "n_kv_heads", 0)
+
         self.encoder = nn.TransformerEncoder(
-            encoder_layer,
+            nn.TransformerEncoderLayer(
+                d_model=config.d_model,
+                nhead=config.n_heads,
+                dim_feedforward=config.ffn_dim,
+                dropout=config.dropout,
+                activation=config.activation,
+                batch_first=True,
+                bias=config.ff_bias,
+            ),
             num_layers=config.enc_layers,
             norm=nn.LayerNorm(config.d_model, eps=1e-6, bias=config.ff_bias),
         )
 
-        decoder_layer = DecoderLayer(
-            d_model=config.d_model,
-            nhead=config.n_heads,
-            ffn_dim=config.ffn_dim,
-            dropout=config.dropout,
-            activation=config.activation,
-            bias=config.ff_bias,
-            mlp_type=config.mlp_type,
-        )
         self.decoder = nn.TransformerDecoder(
-            decoder_layer,
+            nn.TransformerDecoderLayer(
+                d_model=config.d_model,
+                nhead=config.n_heads,
+                dim_feedforward=config.ffn_dim,
+                dropout=config.dropout,
+                activation=config.activation,
+                batch_first=True,
+                bias=config.ff_bias,
+            ),
             num_layers=config.dec_layers,
             norm=nn.LayerNorm(config.d_model, eps=1e-6, bias=config.ff_bias),
         )
@@ -231,6 +352,12 @@ class Seq2SeqTransformer(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+
+        # Tie decoder output-projection weights to the target token embeddings.
+        # This reduces the parameter count by vocab_size × d_model and consistently
+        # improves translation quality (Press & Wolf, 2017).
+        if getattr(config, "tie_embeddings", False):
+            self.generator.weight = self.tgt_tok_emb.embedding.weight
 
     def encode(self, src, src_mask=None):
         src_emb = self.positional_encoding(self.src_tok_emb(src))
@@ -247,9 +374,18 @@ class Seq2SeqTransformer(nn.Module):
 
         # Ensure the encoder itself uses boolean masks internally
         # This is a workaround for quantizable MultiheadAttention
-        memory = self.encoder(
-            src_emb, mask=src_mask, src_key_padding_mask=src_padding_mask
-        )
+        if getattr(self.config, "use_checkpoint", False) and self.training:
+            memory = checkpoint(
+                self.encoder,
+                src_emb,
+                src_mask,
+                src_padding_mask,
+                use_reentrant=False,
+            )
+        else:
+            memory = self.encoder(
+                src_emb, mask=src_mask, src_key_padding_mask=src_padding_mask
+            )
         return memory
 
     def decode(
@@ -287,14 +423,26 @@ class Seq2SeqTransformer(nn.Module):
         ):
             memory_key_padding_mask = memory_key_padding_mask.to(torch.bool)
 
-        out = self.decoder(
-            tgt_emb,
-            memory,
-            tgt_mask=tgt_mask,
-            memory_mask=memory_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=memory_key_padding_mask,
-        )
+        if getattr(self.config, "use_checkpoint", False) and self.training:
+            out = checkpoint(
+                self.decoder,
+                tgt_emb,
+                memory,
+                tgt_mask,
+                memory_mask,
+                tgt_key_padding_mask,
+                memory_key_padding_mask,
+                use_reentrant=False,
+            )
+        else:
+            out = self.decoder(
+                tgt_emb,
+                memory,
+                tgt_mask=tgt_mask,
+                memory_mask=memory_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=memory_key_padding_mask,
+            )
         return out
 
     def project(self, x):

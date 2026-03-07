@@ -69,7 +69,8 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     if device.type == "cuda" and train_cfg.precision == "bf16":
         model = model.to(dtype=torch.bfloat16)
 
-    model = torch.compile(model)
+    if not model_cfg.use_checkpoint:
+        model = torch.compile(model)
 
     if torch.cuda.device_count() > 1 and train_cfg.device in ["cuda", "auto"]:
         print(
@@ -82,9 +83,11 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
 
     optimizer = optim.AdamW(
         model.parameters(),
+        betas=(0.9,0.998),
         lr=train_cfg.lr,
         weight_decay=train_cfg.weight_decay,
         eps=train_cfg.adam_eps,
+        fused=True
     )
 
     # Scheduler
@@ -126,7 +129,18 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         )
         # Remove prefix from torch.compile (_orig_mod.)
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-        save_file(state_dict, path)
+        # safetensors rejects tensors that share storage (e.g. tied embeddings).
+        # Clone any duplicate-storage tensor so each key owns its own buffer.
+        seen_ptrs: dict[int, str] = {}
+        deduped: dict[str, torch.Tensor] = {}
+        for k, v in state_dict.items():
+            ptr = v.data_ptr()
+            if ptr in seen_ptrs:
+                deduped[k] = v.clone()
+            else:
+                seen_ptrs[ptr] = k
+                deduped[k] = v
+        save_file(deduped, path)
         print(f"{get_time_info()} Model weights saved: {path}")
 
         # Save full state (optimizer, scheduler) in .pt for resuming

@@ -10,14 +10,24 @@ class ModelConfig:
     enc_layers: int = 12
     dec_layers: int = 2
     n_heads: int = 16
+    # n_kv_heads controls Grouped Query Attention (GQA) / Multi-Query Attention (MQA).
+    #   0          → standard Multi-Head Attention (n_kv_heads == n_heads)
+    #   1          → Multi-Query Attention (MQA) – maximum KV-cache reduction
+    #   2 … n_heads-1 → GQA with n_heads/n_kv_heads groups
+    # n_heads must be divisible by n_kv_heads.
+    # Smaller n_kv_heads → smaller KV cache → faster autoregressive decoding.
+    n_kv_heads: int = 0
     ffn_dim: int = 4096
     max_len: int = 256
     dropout: float = 0.1
     vocab_size: int = 32000
     activation: str = "gelu"
-    use_checkpoint: bool = False
+    use_checkpoint: bool = True
     ff_bias: bool = False
     mlp_type: str = "standard"  # "standard" or "gated"
+    # Tie the decoder output-projection weights to the target token embeddings.
+    # Reduces parameters by vocab_size × d_model and improves translation quality.
+    tie_embeddings: bool = False
 
     # Special Tokens
     pad_id: int = 0
@@ -58,8 +68,8 @@ class DataConfig:
     # Streaming & Batching
     max_tokens_per_batch: int = 4000
     buffer_size: int = 50000
-    num_workers: int = 2
-    prefetch_factor: int = 64
+    num_workers: int = 4
+    prefetch_factor: int = 32
     pad_multiple: int = 16
     max_seq_len: int = 256  # Hard filter during data loading
 
