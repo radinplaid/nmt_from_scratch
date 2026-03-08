@@ -315,17 +315,46 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
         pad_multiple=data_cfg.pad_multiple,
     )
 
-    dev_dataset = StreamingTextDataset(
-        data_cfg.src_dev_path,
-        data_cfg.tgt_dev_path,
-        src_sp,
-        tgt_sp,
-        max_tokens,
-        buffer_size=data_cfg.buffer_size // 10,  # Smaller buffer for dev
-        max_seq_len=data_cfg.max_seq_len,
-        pad_id=model_cfg.pad_id,
-        pad_multiple=data_cfg.pad_multiple,
-    )
+    # For validation, we want a fixed set of batches.
+    # We'll load a fixed number of samples and pre-batch them.
+    print(f"Loading fixed validation set (max {train_cfg.val_max_samples} samples)...")
+    dev_src_lines = load_file_lines(data_cfg.src_dev_path, limit=train_cfg.val_max_samples)
+    dev_tgt_lines = load_file_lines(data_cfg.tgt_dev_path, limit=train_cfg.val_max_samples)
+
+    dev_samples = []
+    for s, t in zip(dev_src_lines, dev_tgt_lines):
+        s_ids = src_sp.encode(s.strip(), out_type=int, add_bos=True, add_eos=True)
+        t_ids = tgt_sp.encode(t.strip(), out_type=int, add_bos=True, add_eos=True)
+        if len(s_ids) <= data_cfg.max_seq_len and len(t_ids) <= data_cfg.max_seq_len:
+            dev_samples.append((torch.tensor(s_ids), torch.tensor(t_ids)))
+
+    # Sort by length to minimize padding in validation batches
+    dev_samples.sort(key=lambda x: max(len(x[0]), len(x[1])))
+
+    dev_batches = []
+    batch_srcs, batch_tgts = [], []
+    max_len_in_batch = 0
+    for s, t in dev_samples:
+        length = max(len(s), len(t))
+        new_max_len = max(max_len_in_batch, length)
+        new_cost = (len(batch_srcs) + 1) * new_max_len
+
+        if new_cost > max_tokens and batch_srcs:
+            # Use the same _collate logic as StreamingTextDataset
+            # We can just use a dummy instance or make it a static/standalone function
+            # For simplicity, let's just use the train_dataset's _collate
+            dev_batches.append(train_dataset._collate(batch_srcs, batch_tgts))
+            batch_srcs, batch_tgts = [], []
+            max_len_in_batch = 0
+
+        batch_srcs.append(s)
+        batch_tgts.append(t)
+        max_len_in_batch = max(max_len_in_batch, length)
+
+    if batch_srcs:
+        dev_batches.append(train_dataset._collate(batch_srcs, batch_tgts))
+
+    print(f"Created {len(dev_batches)} fixed validation batches.")
 
     # 4. Loaders
     train_loader = DataLoader(
@@ -338,8 +367,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
         multiprocessing_context="spawn" if data_cfg.num_workers > 0 else None,
     )
 
-    dev_loader = DataLoader(
-        dev_dataset, batch_size=None, num_workers=0, pin_memory=False
-    )
+    # dev_loader is now just the list of batches
+    dev_loader = dev_batches
 
     return train_loader, dev_loader, src_sp, tgt_sp

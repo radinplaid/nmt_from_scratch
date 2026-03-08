@@ -180,14 +180,24 @@ def main():
     # 1. Load config and weights
     model_cfg, data_cfg, train_cfg, export_cfg = load_config(args.config)
 
-    if export_cfg.model_path.endswith(".safetensors"):
-        state_dict = load_file(export_cfg.model_path, device="cpu")
-    else:
-        state_dict = torch.load(export_cfg.model_path, map_location="cpu")
-        if "model_state_dict" in state_dict:
-            state_dict = state_dict["model_state_dict"]
-        elif "model" in state_dict:
-            state_dict = state_dict["model"]
+    if not os.path.exists(train_cfg.checkpoint_dir):
+        print(f"Directory {train_cfg.checkpoint_dir} not found.")
+        return
+
+    checkpoints = [
+        f
+        for f in os.listdir(train_cfg.checkpoint_dir)
+        if f.startswith("model_") and f.endswith(".safetensors") and "_int8" not in f and "_ema" not in f
+    ]
+
+    # Sort by step number
+    checkpoints.sort(key=lambda x: int(x.split("_")[1].split(".")[0]), reverse=True)
+
+    latest_checkpoint  = os.path.join(train_cfg.checkpoint_dir, checkpoints[0])
+
+    print(f"Exporting latest checkpoint: {latest_checkpoint}")
+
+    state_dict = load_file(latest_checkpoint, device="cpu")
 
     # Strip _orig_mod. prefix if present (from torch.compile)
     new_state_dict = OrderedDict()
@@ -234,6 +244,9 @@ def main():
         )
 
     tgt_emb = state_dict.get("tgt_tok_emb.embedding.weight")
+    if tgt_emb is None and getattr(model_cfg, "tie_decoder_embeddings", False):
+        tgt_emb = state_dict.get("generator.weight")
+
     if tgt_emb is not None:
         decoder_spec.embeddings.weight = (
             tgt_emb.detach().float().cpu().numpy()
@@ -253,6 +266,8 @@ def main():
         decoder_spec.position_encodings.encodings = pe
 
     # Generator (Projection)
+    if "generator.weight" not in state_dict and getattr(model_cfg, "tie_decoder_embeddings", False):
+        state_dict["generator.weight"] = state_dict["tgt_tok_emb.embedding.weight"]
     set_linear(decoder_spec.projection, state_dict, "generator")
 
     # 4. Encoder Layers

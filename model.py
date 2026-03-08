@@ -83,13 +83,14 @@ class EncoderLayer(nn.Module):
         nhead,
         ffn_dim,
         dropout=0.1,
+        attention_dropout=0.1,
         activation="gelu",
         bias=False,
         mlp_type="standard",
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+            d_model, nhead, dropout=attention_dropout, batch_first=True, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
         self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
@@ -122,16 +123,17 @@ class DecoderLayer(nn.Module):
         nhead,
         ffn_dim,
         dropout=0.1,
+        attention_dropout=0.1,
         activation="gelu",
         bias=False,
         mlp_type="standard",
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+            d_model, nhead, dropout=attention_dropout, batch_first=True, bias=bias
         )
         self.multihead_attn = nn.MultiheadAttention(
-            d_model, nhead, dropout=dropout, batch_first=True, bias=bias
+            d_model, nhead, dropout=attention_dropout, batch_first=True, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
         self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
@@ -198,6 +200,7 @@ class Seq2SeqTransformer(nn.Module):
             nhead=config.n_heads,
             ffn_dim=config.ffn_dim,
             dropout=config.dropout,
+            attention_dropout=config.attention_dropout,
             activation=config.activation,
             bias=config.ff_bias,
             mlp_type=config.mlp_type,
@@ -213,6 +216,7 @@ class Seq2SeqTransformer(nn.Module):
             nhead=config.n_heads,
             ffn_dim=config.ffn_dim,
             dropout=config.dropout,
+            attention_dropout=config.attention_dropout,
             activation=config.activation,
             bias=config.ff_bias,
             mlp_type=config.mlp_type,
@@ -224,8 +228,11 @@ class Seq2SeqTransformer(nn.Module):
         )
 
         self.generator = nn.Linear(
-            config.d_model, config.vocab_size, bias=config.ff_bias
+            config.d_model, config.vocab_size, bias=True
         )
+        # Tie weights
+        if config.tie_decoder_embeddings:
+            self.generator.weight = self.tgt_tok_emb.embedding.weight
 
         # Initialize parameters
         for p in self.parameters():

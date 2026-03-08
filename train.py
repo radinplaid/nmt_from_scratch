@@ -1,6 +1,9 @@
 import torch
 import torch.optim as optim
 import torch.nn as nn
+import torch.distributed as dist
+import contextlib
+from torch.nn.parallel import DistributedDataParallel as DDP
 from config import ModelConfig, DataConfig, TrainConfig
 
 from model import Seq2SeqTransformer
@@ -12,6 +15,59 @@ import sacrebleu
 import math
 from aim import Run
 from safetensors.torch import save_file
+
+
+class EMA:
+    """
+    Exponential Moving Average for model parameters.
+    """
+
+    def __init__(self, model, decay):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+
+    def _get_raw_model(self):
+        # Handle torch.compile wrapper if present
+        model = self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model
+        # Handle DDP wrapper if present
+        model = model.module if hasattr(model, "module") else model
+        return model
+
+    def register(self):
+        raw_model = self._get_raw_model()
+        for name, param in raw_model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.detach().clone()
+
+    @torch.no_grad()
+    def update(self):
+        raw_model = self._get_raw_model()
+        for name, param in raw_model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                # v_new = (1 - alpha) * v_old + alpha * v_current
+                # We use in-place operations to save memory
+                self.shadow[name].mul_(1.0 - self.decay).add_(param.detach(), alpha=self.decay)
+
+    @torch.no_grad()
+    def apply_shadow(self):
+        raw_model = self._get_raw_model()
+        for name, param in raw_model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.backup[name] = param.detach().clone()
+                param.copy_(self.shadow[name])
+
+    @torch.no_grad()
+    def restore(self):
+        raw_model = self._get_raw_model()
+        for name, param in raw_model.named_parameters():
+            if param.requires_grad:
+                assert name in self.backup
+                param.copy_(self.backup[name])
+        self.backup = {}
 
 
 def train(model_cfg=None, data_cfg=None, train_cfg=None):
@@ -36,6 +92,23 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(train_cfg.device)
+
+    # DDP Setup
+    is_distributed = False
+    rank = 0
+    world_size = 1
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        dist.init_process_group("nccl" if device.type == "cuda" else "gloo")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        device = torch.device(f"{device.type}:{rank}")
+        is_distributed = True
+        if rank != 0:
+            # Suppress printing on non-zero ranks
+            import builtins
+
+            builtins.print = lambda *args, **kwargs: None
+
     print(f"{get_time_info()} Using device: {device}")
 
     # Performance optimizations
@@ -69,22 +142,50 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     if device.type == "cuda" and train_cfg.precision == "bf16":
         model = model.to(dtype=torch.bfloat16)
 
-    model = torch.compile(model)
-
-    if torch.cuda.device_count() > 1 and train_cfg.device in ["cuda", "auto"]:
+    if is_distributed:
+        model = DDP(model, device_ids=[rank] if device.type == "cuda" else None)
+    elif torch.cuda.device_count() > 1 and train_cfg.device in ["cuda", "auto"]:
         print(
             f"{get_time_info()} Detected {torch.cuda.device_count()} GPUs. Using DataParallel."
         )
         model = nn.DataParallel(model)
+
+    model = torch.compile(model)
+
     print(
         f"{get_time_info()} Model parameters: {sum(p.numel() for p in model.parameters())}"
     )
+
+    print(
+        f"{get_time_info()} Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
+    )
+
+    # Print model architecture
+    print(f"\n{get_time_info()} Model Architecture:")
+    print("-" * 60)
+    print(model)
+    print("-" * 60)
+
+    # Print configs
+    print(f"\n{get_time_info()} Configuration:")
+    print("-" * 60)
+    print("Model Config:")
+    for key, value in model_cfg.__dict__.items():
+        print(f"  {key}: {value}")
+    print("\nData Config:")
+    for key, value in data_cfg.__dict__.items():
+        print(f"  {key}: {value}")
+    print("\nTrain Config:")
+    for key, value in train_cfg.__dict__.items():
+        print(f"  {key}: {value}")
+    print("-" * 60)
 
     optimizer = optim.AdamW(
         model.parameters(),
         lr=train_cfg.lr,
         weight_decay=train_cfg.weight_decay,
         eps=train_cfg.adam_eps,
+        betas=train_cfg.adam_betas
     )
 
     # Scheduler
@@ -110,7 +211,15 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     global_step = 0
 
-    def save_checkpoint(step, model, optimizer, scheduler, config):
+    # EMA
+    ema = None
+    if train_cfg.ema_decay > 0 and train_cfg.ema_start_step == 0:
+        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        ema = EMA(raw_model, train_cfg.ema_decay)
+        ema.register()
+        print(f"{get_time_info()} Initialized EMA with decay {train_cfg.ema_decay}")
+
+    def save_checkpoint(step, model, optimizer, scheduler, config, ema=None):
         # Ensure experiment directory exists
         os.makedirs(config.experiment_name, exist_ok=True)
 
@@ -119,15 +228,23 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
 
         path = os.path.join(config.checkpoint_dir, f"model_{step}.safetensors")
         # Handle torch.compile wrapper if present
-        state_dict = (
-            model.module.state_dict()
-            if hasattr(model, "module")
-            else model.state_dict()
-        )
-        # Remove prefix from torch.compile (_orig_mod.)
-        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-        save_file(state_dict, path)
+        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        # Handle DDP wrapper if present
+        raw_model = raw_model.module if hasattr(raw_model, "module") else raw_model
+
+        from safetensors.torch import save_model
+
+        save_model(raw_model, path)
         print(f"{get_time_info()} Model weights saved: {path}")
+
+        if ema is not None:
+            ema.apply_shadow()
+            try:
+                ema_path = os.path.join(config.checkpoint_dir, f"model_{step}_ema.safetensors")
+                save_model(raw_model, ema_path)
+                print(f"{get_time_info()} EMA weights saved: {ema_path}")
+            finally:
+                ema.restore()
 
         # Save full state (optimizer, scheduler) in .pt for resuming
         path_pt = os.path.join(config.checkpoint_dir, f"checkpoint_{step}.pt")
@@ -189,66 +306,66 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         train_cfg,
         data_cfg,
         model_cfg,
-        use_autoregressive=False,
+        use_autoregressive=True,
+        ema=None,
     ):
         """
         Validate the model.
         """
-        model.eval()
-        total_loss_sum = 0
-        total_tokens = 0
-        correct_tokens = 0
+        if ema is not None:
+            ema.apply_shadow()
+            print(f"{get_time_info()} [Validation] Using EMA weights")
 
-        # Limit samples for BLEU calculation to reduce memory
-        max_samples = train_cfg.val_max_samples
-        hypotheses = []
-        references = []
-        sample_count = 0
+        try:
+            model.eval()
+            total_loss_sum = 0
+            total_tokens = 0
+            correct_tokens = 0
 
-        # Use inference_mode instead of no_grad for better performance
-        autocast_dtype = (
-            torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
-        )
+            hypotheses = []
+            references = []
 
-        with torch.inference_mode():
-            for batch_idx, (src, tgt) in enumerate(loader):
-                src, tgt = (
-                    src.to(device, non_blocking=True),
-                    tgt.to(device, non_blocking=True),
-                )
+            # Use inference_mode instead of no_grad for better performance
+            autocast_dtype = (
+                torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
+            )
 
-                # Forward pass for loss and logits (calculates loss internally)
-                with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                    loss_sum, (logits, num_tokens_batch) = model(
-                        src, tgt, return_outputs=True
+            with torch.inference_mode():
+                for batch_idx, (src, tgt) in enumerate(loader):
+                    src, tgt = (
+                        src.to(device, non_blocking=True),
+                        tgt.to(device, non_blocking=True),
                     )
 
-                # Handle DataParallel output (vectors per GPU)
-                if loss_sum.ndim > 0:
-                    loss_sum = loss_sum.sum()
-                if num_tokens_batch.ndim > 0:
-                    num_tokens_batch = num_tokens_batch.sum()
+                    # Forward pass for loss and logits (calculates loss internally)
+                    with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                        loss_sum, (logits, num_tokens_batch) = model(
+                            src, tgt, return_outputs=True
+                        )
 
-                # Accumulate loss and tokens
-                total_loss_sum += loss_sum.item()
-                total_tokens += num_tokens_batch.item()
+                    # Handle DataParallel output (vectors per GPU)
+                    if loss_sum.ndim > 0:
+                        loss_sum = loss_sum.sum()
+                    if num_tokens_batch.ndim > 0:
+                        num_tokens_batch = num_tokens_batch.sum()
 
-                # Accuracy calculation
-                tgt_labels = tgt[:, 1:]
-                preds = logits.argmax(dim=-1)
-                mask_acc = tgt_labels != model_cfg.pad_id
-                correct_tokens += ((preds == tgt_labels) & mask_acc).sum().item()
+                    # Accumulate loss and tokens
+                    total_loss_sum += loss_sum.item()
+                    total_tokens += num_tokens_batch.item()
 
-                # Generation for BLEU/ChrF - only process if we still need samples
-                if sample_count < max_samples:
+                    # Accuracy calculation
+                    tgt_labels = tgt[:, 1:]
+                    preds = logits.argmax(dim=-1)
+                    mask_acc = tgt_labels != model_cfg.pad_id
+                    correct_tokens += ((preds == tgt_labels) & mask_acc).sum().item()
+
+                    # Generation for BLEU/ChrF
                     if use_autoregressive:
                         # True autoregressive generation including encoding
                         raw_model = model.module if hasattr(model, "module") else model
-                        enc = raw_model.encode(src)
                         generated_ids = raw_model.generate(
                             src,
                             max_len=model_cfg.max_len,
-                            enc_output=enc,
                             bos_id=model_cfg.bos_id,
                             eos_id=model_cfg.eos_id,
                         )
@@ -257,8 +374,6 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                         generated_ids = preds
 
                     for i in range(src.size(0)):
-                        if sample_count >= max_samples:
-                            break
                         # Post-process: stop at EOS or PAD tokens
                         ids = generated_ids[i].tolist()
                         # Find first EOS or PAD token and truncate
@@ -270,30 +385,49 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                                 ids = ids[:idx]
                                 break
                         hyp = tgt_sp.decode(ids)
-                        ref = tgt_sp.decode(tgt[i].tolist())
+                        
+                        # Reference decoding: also stop at EOS/PAD
+                        ref_ids = tgt[i].tolist()
+                        # Skip BOS (usually at index 0)
+                        if len(ref_ids) > 0 and ref_ids[0] == model_cfg.bos_id:
+                            ref_ids = ref_ids[1:]
+                        for idx, token_id in enumerate(ref_ids):
+                            if (
+                                token_id == model_cfg.eos_id
+                                or token_id == model_cfg.pad_id
+                            ):
+                                ref_ids = ref_ids[:idx]
+                                break
+                        ref = tgt_sp.decode(ref_ids)
+                        
                         hypotheses.append(hyp)
                         references.append(ref)
-                        sample_count += 1
 
-        avg_loss = total_loss_sum / max(1, total_tokens)
-        ppl = math.exp(min(avg_loss, 100))
-        acc = correct_tokens / max(1, total_tokens)
+            avg_loss = total_loss_sum / max(1, total_tokens)
+            ppl = math.exp(min(avg_loss, 100))
+            acc = correct_tokens / max(1, total_tokens)
 
-        bleu = sacrebleu.corpus_bleu(hypotheses, [references]).score
-        chrf = sacrebleu.corpus_chrf(hypotheses, [references]).score
+            # sacrebleu expects a list of lists for references (multiple references per hypothesis)
+            bleu = sacrebleu.corpus_bleu(hypotheses, [references]).score
+            chrf = sacrebleu.corpus_chrf(hypotheses, [references]).score
 
-        metrics = {"loss": avg_loss, "ppl": ppl, "acc": acc, "bleu": bleu, "chrf": chrf}
+            metrics = {"loss": avg_loss, "ppl": ppl, "acc": acc, "bleu": bleu, "chrf": chrf}
 
-        print(
-            f"\n{get_time_info()} [Validation] Loss: {avg_loss:.4f} | PPL: {ppl:.2f} | Acc: {acc:.4f} | BLEU: {bleu:.2f} | ChrF: {chrf:.2f}"
-        )
-        for i in range(min(10, len(hypotheses))):
-            print(f"Sample {i}:")
-            print(f"  Ref: {references[i]}")
-            print(f"  Hyp: {hypotheses[i]}")
-        print("-" * 30)
+            print(
+                f"\n{get_time_info()} [Validation] Loss: {avg_loss:.4f} | PPL: {ppl:.2f} | Acc: {acc:.4f} | BLEU: {bleu:.2f} | ChrF: {chrf:.2f}"
+            )
+            for i in range(min(5, len(hypotheses))):
+                print(f"Sample {i}:")
+                print(f"  Ref: {references[i]}")
+                print(f"  Hyp: {hypotheses[i]}")
+            print("-" * 30)
+        finally:
+            if ema is not None:
+                ema.restore()
+                print(f"{get_time_info()} [Validation] Restored original weights")
 
-        model.train()
+            model.train()
+        
         return metrics
 
     # Loop
@@ -322,17 +456,29 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
             )
 
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                loss, num_tokens = model(
-                    src, tgt, label_smoothing=train_cfg.label_smoothing
+                # Disable gradient synchronization during accumulation steps
+                context = (
+                    model.no_sync()
+                    if is_distributed
+                    and (batch_idx + 1) % train_cfg.accum_steps != 0
+                    else contextlib.nullcontext()
                 )
+                with context:
+                    loss, num_tokens = model(
+                        src, tgt, label_smoothing=train_cfg.label_smoothing
+                    )
 
-                # Handle DataParallel output (vectors per GPU)
-                if loss.ndim > 0:
-                    loss = loss.sum()
-                if num_tokens.ndim > 0:
-                    num_tokens = num_tokens.sum()
+                    # Handle DataParallel/DDP output (vectors per GPU)
+                    if loss.ndim > 0:
+                        loss = loss.sum()
+                    if num_tokens.ndim > 0:
+                        num_tokens = num_tokens.sum()
 
-            loss.backward()
+                    # Scale loss by accumulation steps to simulate larger batch size
+                    # This is the standard way to do accumulation in PyTorch
+                    loss = loss / train_cfg.accum_steps
+
+                loss.backward()
             accum_loss += loss.item()
             accum_tokens += num_tokens.item()
 
@@ -344,13 +490,41 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
             batch_tgt_tokens += (tgt != model_cfg.pad_id).sum().item()
 
             if (batch_idx + 1) % train_cfg.accum_steps == 0:
-                # Scale gradients by total number of tokens in the accumulation bucket
-                for p in model.parameters():
-                    if p.grad is not None:
-                        p.grad.data.div_(max(1, accum_tokens))
+                if is_distributed:
+                    # Average gradients across all processes
+                    # We also need to sync the token count to ensure correct scaling
+                    tokens_tensor = torch.tensor([accum_tokens], device=device)
+                    dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
+                    total_accum_tokens = tokens_tensor.item()
+
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            dist.all_reduce(p.grad.data, op=dist.ReduceOp.SUM)
+                            # Scale by total tokens across all GPUs
+                            # We multiply by accum_steps because we divided the loss by it earlier
+                            p.grad.data.mul_(train_cfg.accum_steps).div_(max(1, total_accum_tokens))
+                else:
+                    # Scale gradients by total number of tokens in the accumulation bucket
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            # We multiply by accum_steps because we divided the loss by it earlier
+                            p.grad.data.mul_(train_cfg.accum_steps).div_(max(1, accum_tokens))
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
                 optimizer.step()
+                
+                # EMA Update
+                if train_cfg.ema_decay > 0:
+                    if global_step + 1 == train_cfg.ema_start_step:
+                        # Get the raw model to avoid any torch.compile issues
+                        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+                        ema = EMA(raw_model, train_cfg.ema_decay)
+                        ema.register()
+                        print(f"{get_time_info()} Initialized EMA at step {global_step + 1}")
+                    elif global_step + 1 > train_cfg.ema_start_step:
+                        if ema is not None:
+                            ema.update()
+
                 scheduler.step()
                 optimizer.zero_grad()
 
@@ -358,6 +532,22 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                 accum_loss = 0
                 accum_tokens = 0
                 global_step += 1
+
+                if global_step >= train_cfg.max_steps:
+                    # Final validation and checkpoint
+                    val_metrics = validate(
+                        model,
+                        dev_loader,
+                        src_sp,
+                        tgt_sp,
+                        device,
+                        train_cfg,
+                        data_cfg,
+                        model_cfg,
+                        ema=ema,
+                    )
+                    save_checkpoint(global_step, model, optimizer, scheduler, train_cfg, ema=ema)
+                    break
 
                 # Validation and Checkpointing
                 if global_step % train_cfg.eval_steps == 0:
@@ -370,6 +560,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                         train_cfg,
                         data_cfg,
                         model_cfg,
+                        ema=ema,
                     )
                     for k, v in val_metrics.items():
                         run.track(
@@ -378,7 +569,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                             step=global_step,
                             context={"subset": "dev"},
                         )
-                    save_checkpoint(global_step, model, optimizer, scheduler, train_cfg)
+                    save_checkpoint(global_step, model, optimizer, scheduler, train_cfg, ema=ema)
 
             # Progress Print
             if batch_idx % train_cfg.log_steps == 0:
@@ -409,6 +600,9 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                 batch_tgt_tokens = 0
                 last_log_time = time.time()
 
+            if global_step >= train_cfg.max_steps:
+                break
+
         avg_loss = total_loss_sum / max(1, total_tokens_epoch)
         print(
             f"{get_time_info()} Epoch {epoch + 1}/{train_cfg.epochs} Completed | Avg Loss: {avg_loss:.4f} | Epoch Time: {time.time() - start_time:.2f}s"
@@ -420,6 +614,10 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     print(
         f"\n{get_time_info()} Running final quick test on {train_cfg.quick_test_samples} dev samples:"
     )
+    if ema is not None:
+        ema.apply_shadow()
+        print(f"{get_time_info()} Using EMA weights for final test")
+
     model.eval()
 
     samples_found = 0
@@ -488,9 +686,5 @@ if __name__ == "__main__":
     train_cfg = None
     if args.config:
         model_cfg, data_cfg, train_cfg, _ = load_config(args.config)
-
-    print(model_cfg)
-    print(data_cfg)
-    print(train_cfg)
 
     train(model_cfg, data_cfg, train_cfg)

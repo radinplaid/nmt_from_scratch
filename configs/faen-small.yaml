@@ -1,12 +1,13 @@
 model:
-  d_model: 512
-  enc_layers: 8
+  d_model: 256
+  enc_layers: 6
   dec_layers: 2
-  n_heads: 8
-  ffn_dim: 2048
+  n_heads: 4
+  ffn_dim: 1024
   max_len: 256
   vocab_size: 10000
   mlp_type: "gated"
+  #activation: "silu"
   activation: "gelu"
 
 data:
@@ -16,22 +17,25 @@ data:
   tgt_train_path: "data/train.en"
   src_dev_path: "data/dev.fa"
   tgt_dev_path: "data/dev.en"
-  max_tokens_per_batch: 10000
+  max_tokens_per_batch: 20000
   buffer_size: 150000
+  prefetch_factor: 128
   num_workers: 4
 
 train:
   experiment_name: "faen-small"
   aim_repo: "~/mt/.aim"
-  lr: 1.0e-3
-  accum_steps: 12
+  lr: 2.5e-3
+  accum_steps: 6
   warmup_steps: 5000
-  max_steps: 100000
-  eval_steps: 2500
+  max_steps: 20000
+  eval_steps: 2000
   max_checkpoints: 4
   precision: "bf16"
+  ema_decay: 0.0005
+  ema_start_step: 5000
 
 export:
-  k: 4
+  k: 1
   export_int8: false
   quantization: "int8"

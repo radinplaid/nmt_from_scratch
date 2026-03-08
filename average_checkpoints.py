@@ -24,7 +24,7 @@ def main():
     checkpoints = [
         f
         for f in os.listdir(train_cfg.checkpoint_dir)
-        if f.startswith("model_") and f.endswith(".safetensors") and "_int8" not in f
+        if f.startswith("model_") and f.endswith(".safetensors") and "_int8" not in f and "_ema" not in f
     ]
 
     # Sort by step number
@@ -76,7 +76,12 @@ def main():
     torch.save({"model_state_dict": avg_state_dict}, pt_output)
 
     st_output = f"{export_cfg.output_prefix}.safetensors"
-    save_file(avg_state_dict, st_output)
+    # Use a dummy model to save with tied weights correctly using save_model
+    temp_model = Seq2SeqTransformer(model_cfg)
+    temp_model.load_state_dict(avg_state_dict, strict=False)
+    from safetensors.torch import save_model
+
+    save_model(temp_model, st_output)
     print(f"Saved averaged model to {pt_output} and {st_output}")
 
     # 4. Calibration and INT8 Export
@@ -93,7 +98,7 @@ def main():
 
         # Load averaged weights BEFORE preparing for quantization
         print("Loading averaged weights...")
-        model.load_state_dict(avg_state_dict)
+        model.load_state_dict(avg_state_dict, strict=False)
         model.eval()
 
         # Prepare model for Post-Training Quantization (PTQ)

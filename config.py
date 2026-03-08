@@ -1,4 +1,5 @@
 from dataclasses import dataclass, fields
+from typing import List, Tuple
 import os
 
 
@@ -13,11 +14,13 @@ class ModelConfig:
     ffn_dim: int = 4096
     max_len: int = 256
     dropout: float = 0.1
+    attention_dropout: float = 0.1
     vocab_size: int = 32000
     activation: str = "gelu"
     use_checkpoint: bool = False
     ff_bias: bool = False
     mlp_type: str = "standard"  # "standard" or "gated"
+    tie_decoder_embeddings: bool = True
 
     # Special Tokens
     pad_id: int = 0
@@ -76,6 +79,7 @@ class TrainConfig:
     weight_decay: float = 0.01
     adam_eps: float = 1e-6
     label_smoothing: float = 0.1
+    adam_betas: Tuple[float, float] = (0.9, 0.998)
 
     # Scheduler
     scheduler_type: str = "inv_sqrt"  # "inv_sqrt" or "cosine"
@@ -88,6 +92,8 @@ class TrainConfig:
     grad_clip: float = 1.0
     eval_steps: int = 2500
     max_checkpoints: int = 4
+    ema_decay: float = 0.0  # 0.0 means disabled, e.g. 0.0001
+    ema_start_step: int = 0  # Step to start EMA updates
 
     # Hardware & Performance
     device: str = "cuda"  # "cuda", "cpu", or "auto"
@@ -96,8 +102,8 @@ class TrainConfig:
 
     # Logging & Validation
     log_steps: int = 1000
-    val_max_samples: int = 500
-    quick_test_samples: int = 5
+    val_max_samples: int = 1000
+    quick_test_samples: int = 20
 
     @property
     def checkpoint_dir(self) -> str:
