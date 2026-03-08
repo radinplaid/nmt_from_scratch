@@ -1,17 +1,19 @@
-import torch
-import torch.optim as optim
-import torch.nn as nn
-from config import ModelConfig, DataConfig, TrainConfig
-
-from model import Seq2SeqTransformer
-from data import PrepareData
+import math
+import os
 import time
 from datetime import datetime, timedelta
-import os
+
 import sacrebleu
-import math
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from aim import Run
 from safetensors.torch import save_file
+from shutil import copyfile
+
+from config import DataConfig, ModelConfig, TrainConfig
+from data import PrepareData
+from model import Seq2SeqTransformer
 
 
 def train(model_cfg=None, data_cfg=None, train_cfg=None):
@@ -80,7 +82,6 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         f"{get_time_info()} Model parameters: {sum(p.numel() for p in model.parameters())}"
     )
 
-
     print(
         f"{get_time_info()} Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
     )
@@ -94,7 +95,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     # Print configs
     print(f"\n{get_time_info()} Configuration:")
     print("-" * 60)
-    
+
     print("Model Config:")
     for key, value in model_cfg.__dict__.items():
         print(f"  {key}: {value}")
@@ -102,11 +103,11 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     print("\nData Config:")
     for key, value in data_cfg.__dict__.items():
         print(f"  {key}: {value}")
-    
+
     print("\nTrain Config:")
     for key, value in train_cfg.__dict__.items():
         print(f"  {key}: {value}")
-    
+
     print("-" * 60)
 
     optimizer = optim.AdamW(
@@ -512,6 +513,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
 
 if __name__ == "__main__":
     import argparse
+
     from config import load_config
 
     parser = argparse.ArgumentParser()
@@ -524,8 +526,11 @@ if __name__ == "__main__":
     if args.config:
         model_cfg, data_cfg, train_cfg, _ = load_config(args.config)
 
-    print(model_cfg)
-    print(data_cfg)
-    print(train_cfg)
+    for i in  (train_cfg, data_cfg, model_cfg):
+        assert i is not None
+        print(i)
+
+    # Copy config to experiment folder
+    copyfile(args.config, os.path.join(train_cfg.experiment_name, "config.yaml")) # type: ignore
 
     train(model_cfg, data_cfg, train_cfg)

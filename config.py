@@ -130,10 +130,6 @@ class ExportConfig:
     experiment_name: str = "default"
 
     @property
-    def model_path(self) -> str:
-        return os.path.join(self.experiment_name, "averaged_model.safetensors")
-
-    @property
     def output_dir(self) -> str:
         return os.path.join(self.experiment_name, "exported_model")
 

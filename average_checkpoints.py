@@ -11,12 +11,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="Average the last k checkpoints and save as safetensors/INT8"
     )
-    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("--experiment_dir", type=str, required=True, help="Path to experiment directory")
     args = parser.parse_args()
 
-    model_cfg, data_cfg, train_cfg, export_cfg = load_config(args.config)
+    model_cfg, data_cfg, train_cfg, export_cfg = load_config(
+        os.path.join(args.experiment_dir, "config.yaml")
+    )
 
-    # 1. Find the last k models
+    # 1. Find the last k models, k defined in export_cfg
     if not os.path.exists(train_cfg.checkpoint_dir):
         print(f"Directory {train_cfg.checkpoint_dir} not found.")
         return

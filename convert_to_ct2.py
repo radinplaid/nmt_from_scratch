@@ -174,20 +174,19 @@ def convert_vocab(sp_vocab_path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("--experiment_dir", type=str, required=True, help="Path to experiment directory")
     args = parser.parse_args()
 
-    # 1. Load config and weights
-    model_cfg, data_cfg, train_cfg, export_cfg = load_config(args.config)
+    model_cfg, data_cfg, train_cfg, export_cfg = load_config(
+        os.path.join(args.experiment_dir, "config.yaml")
+    )
 
-    if export_cfg.model_path.endswith(".safetensors"):
-        state_dict = load_file(export_cfg.model_path, device="cpu")
-    else:
-        state_dict = torch.load(export_cfg.model_path, map_location="cpu")
-        if "model_state_dict" in state_dict:
-            state_dict = state_dict["model_state_dict"]
-        elif "model" in state_dict:
-            state_dict = state_dict["model"]
+    model_file = os.path.join(args.experiment_dir, "averaged_model.safetensors")
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(f"Model file not found at {model_file}")   
+
+    state_dict = load_file(model_file, device="cpu")
+
 
     # Strip _orig_mod. prefix if present (from torch.compile)
     new_state_dict = OrderedDict()

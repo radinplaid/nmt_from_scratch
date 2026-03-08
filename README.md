@@ -67,10 +67,10 @@ vim configs/faen-small.yaml
 python train.py --config configs/faen-small.yaml 
 
 # Average checkpoints and quantize the model
-python average_checkpoints.py --config configs/faen-small.yaml
+python average_checkpoints.py --experiment_dir faen-small
 
 # Convert to CTranslate2 format
-python convert_to_ct2.py --config configs/faen-small.yaml
+python convert_to_ct2.py --experiment_dir faen-small
 
 # Evaluate (uses quickmt library, https://github.com/quickmt/quickmt)
 python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cuda --batch_size 8 --beam_size 5 --model ./faen-small/exported_model
