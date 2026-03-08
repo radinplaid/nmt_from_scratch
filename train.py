@@ -80,6 +80,35 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         f"{get_time_info()} Model parameters: {sum(p.numel() for p in model.parameters())}"
     )
 
+
+    print(
+        f"{get_time_info()} Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
+    )
+
+    # Print model architecture
+    print(f"\n{get_time_info()} Model Architecture:")
+    print("-" * 60)
+    print(model)
+    print("-" * 60)
+
+    # Print configs
+    print(f"\n{get_time_info()} Configuration:")
+    print("-" * 60)
+    
+    print("Model Config:")
+    for key, value in model_cfg.__dict__.items():
+        print(f"  {key}: {value}")
+
+    print("\nData Config:")
+    for key, value in data_cfg.__dict__.items():
+        print(f"  {key}: {value}")
+    
+    print("\nTrain Config:")
+    for key, value in train_cfg.__dict__.items():
+        print(f"  {key}: {value}")
+    
+    print("-" * 60)
+
     optimizer = optim.AdamW(
         model.parameters(),
         lr=train_cfg.lr,
@@ -380,6 +409,9 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                         )
                     save_checkpoint(global_step, model, optimizer, scheduler, train_cfg)
 
+                if global_step >= train_cfg.max_steps:
+                    break
+
             # Progress Print
             if batch_idx % train_cfg.log_steps == 0:
                 curr_lr = optimizer.param_groups[0]["lr"]
@@ -413,6 +445,9 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         print(
             f"{get_time_info()} Epoch {epoch + 1}/{train_cfg.epochs} Completed | Avg Loss: {avg_loss:.4f} | Epoch Time: {time.time() - start_time:.2f}s"
         )
+
+        if global_step >= train_cfg.max_steps:
+            break
 
     print(f"{get_time_info()} Training complete.")
 
