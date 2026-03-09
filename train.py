@@ -530,6 +530,9 @@ if __name__ == "__main__":
         assert i is not None
         print(i)
 
+    # Make experiment folder if not exists
+    os.makedirs(train_cfg.experiment_name, exist_ok=True)
+
     # Copy config to experiment folder
     copyfile(args.config, os.path.join(train_cfg.experiment_name, "config.yaml")) # type: ignore
 
