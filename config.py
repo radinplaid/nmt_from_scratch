@@ -11,13 +11,14 @@ class ModelConfig:
     dec_layers: int = 2
     n_heads: int = 16
     ffn_dim: int = 4096
-    max_len: int = 256
+    max_len: int = 512 # Hard filter during data loading
     dropout: float = 0.1
     vocab_size: int = 32000
     activation: str = "gelu"
     use_checkpoint: bool = False
     ff_bias: bool = False
     mlp_type: str = "standard"  # "standard" or "gated"
+    layernorm_eps: float = 1e-5
 
     # Special Tokens
     pad_id: int = 0
@@ -61,7 +62,6 @@ class DataConfig:
     num_workers: int = 2
     prefetch_factor: int = 64
     pad_multiple: int = 16
-    max_seq_len: int = 256  # Hard filter during data loading
 
 
 @dataclass

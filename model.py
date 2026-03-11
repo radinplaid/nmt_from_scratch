@@ -82,6 +82,7 @@ class EncoderLayer(nn.Module):
         d_model,
         nhead,
         ffn_dim,
+        layernorm_eps,
         dropout=0.1,
         activation="gelu",
         bias=False,
@@ -92,8 +93,8 @@ class EncoderLayer(nn.Module):
             d_model, nhead, dropout=dropout, batch_first=True, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
-        self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
-        self.norm2 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
+        self.norm1 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
+        self.norm2 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
@@ -121,6 +122,7 @@ class DecoderLayer(nn.Module):
         d_model,
         nhead,
         ffn_dim,
+        layernorm_eps,
         dropout=0.1,
         activation="gelu",
         bias=False,
@@ -134,9 +136,9 @@ class DecoderLayer(nn.Module):
             d_model, nhead, dropout=dropout, batch_first=True, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
-        self.norm1 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
-        self.norm2 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
-        self.norm3 = nn.LayerNorm(d_model, eps=1e-6, bias=bias)
+        self.norm1 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
+        self.norm2 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
+        self.norm3 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
         self.dropout = nn.Dropout(dropout)
 
     def forward(
@@ -197,6 +199,7 @@ class Seq2SeqTransformer(nn.Module):
             d_model=config.d_model,
             nhead=config.n_heads,
             ffn_dim=config.ffn_dim,
+            layernorm_eps=config.layernorm_eps,
             dropout=config.dropout,
             activation=config.activation,
             bias=config.ff_bias,
@@ -205,13 +208,16 @@ class Seq2SeqTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=config.enc_layers,
-            norm=nn.LayerNorm(config.d_model, eps=1e-6, bias=config.ff_bias),
+            norm=nn.LayerNorm(
+                config.d_model, eps=config.layernorm_eps, bias=config.ff_bias
+            ),
         )
 
         decoder_layer = DecoderLayer(
             d_model=config.d_model,
             nhead=config.n_heads,
             ffn_dim=config.ffn_dim,
+            layernorm_eps=config.layernorm_eps,
             dropout=config.dropout,
             activation=config.activation,
             bias=config.ff_bias,
@@ -220,12 +226,12 @@ class Seq2SeqTransformer(nn.Module):
         self.decoder = nn.TransformerDecoder(
             decoder_layer,
             num_layers=config.dec_layers,
-            norm=nn.LayerNorm(config.d_model, eps=1e-6, bias=config.ff_bias),
+            norm=nn.LayerNorm(
+                config.d_model, eps=config.layernorm_eps, bias=config.ff_bias
+            ),
         )
 
-        self.generator = nn.Linear(
-            config.d_model, config.vocab_size, bias=config.ff_bias
-        )
+        self.generator = nn.Linear(config.d_model, config.vocab_size, bias=True)
 
         # Initialize parameters
         for p in self.parameters():

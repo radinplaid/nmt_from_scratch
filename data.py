@@ -20,7 +20,7 @@ class StreamingTextDataset(IterableDataset):
         tgt_sp,
         max_tokens: int,
         buffer_size: int = 10000,
-        max_seq_len: int = 256,
+        max_seq_len: int = 512,
         pad_id: int = 0,
         pad_multiple: int = 16,
     ):
@@ -310,7 +310,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
         tgt_sp,
         max_tokens,
         buffer_size=data_cfg.buffer_size,
-        max_seq_len=data_cfg.max_seq_len,
+        max_seq_len=model_cfg.max_len,
         pad_id=model_cfg.pad_id,
         pad_multiple=data_cfg.pad_multiple,
     )
@@ -322,7 +322,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
         tgt_sp,
         max_tokens,
         buffer_size=data_cfg.buffer_size // 10,  # Smaller buffer for dev
-        max_seq_len=data_cfg.max_seq_len,
+        max_seq_len=model_cfg.max_len,
         pad_id=model_cfg.pad_id,
         pad_multiple=data_cfg.pad_multiple,
     )
