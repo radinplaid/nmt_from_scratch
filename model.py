@@ -4,6 +4,19 @@ import math
 import torch.ao.quantization
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, d_model, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d_model))
+
+    def forward(self, x):
+        # Calculate RMS
+        norm_x = torch.mean(x**2, dim=-1, keepdim=True)
+        x_normed = x * torch.rsqrt(norm_x + self.eps)
+        return self.weight * x_normed
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super().__init__()
@@ -76,6 +89,13 @@ class FeedForward(nn.Module):
         return x
 
 
+def get_norm(d_model, eps, bias, norm_type):
+    if norm_type == "rmsnorm":
+        return RMSNorm(d_model, eps=eps)
+    else:
+        return nn.LayerNorm(d_model, eps=eps, bias=bias)
+
+
 class EncoderLayer(nn.Module):
     def __init__(
         self,
@@ -87,14 +107,15 @@ class EncoderLayer(nn.Module):
         activation="gelu",
         bias=False,
         mlp_type="standard",
+        norm_type="layernorm",
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
             d_model, nhead, dropout=dropout, batch_first=True, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
-        self.norm1 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
-        self.norm2 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
+        self.norm1 = get_norm(d_model, layernorm_eps, bias, norm_type)
+        self.norm2 = get_norm(d_model, layernorm_eps, bias, norm_type)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
@@ -127,6 +148,7 @@ class DecoderLayer(nn.Module):
         activation="gelu",
         bias=False,
         mlp_type="standard",
+        norm_type="layernorm",
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
@@ -136,9 +158,9 @@ class DecoderLayer(nn.Module):
             d_model, nhead, dropout=dropout, batch_first=True, bias=bias
         )
         self.ffn = FeedForward(d_model, ffn_dim, dropout, activation, bias, mlp_type)
-        self.norm1 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
-        self.norm2 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
-        self.norm3 = nn.LayerNorm(d_model, eps=layernorm_eps, bias=bias)
+        self.norm1 = get_norm(d_model, layernorm_eps, bias, norm_type)
+        self.norm2 = get_norm(d_model, layernorm_eps, bias, norm_type)
+        self.norm3 = get_norm(d_model, layernorm_eps, bias, norm_type)
         self.dropout = nn.Dropout(dropout)
 
     def forward(
@@ -204,12 +226,13 @@ class Seq2SeqTransformer(nn.Module):
             activation=config.activation,
             bias=config.ff_bias,
             mlp_type=config.mlp_type,
+            norm_type=config.norm_type,
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=config.enc_layers,
-            norm=nn.LayerNorm(
-                config.d_model, eps=config.layernorm_eps, bias=config.ff_bias
+            norm=get_norm(
+                config.d_model, config.layernorm_eps, config.ff_bias, config.norm_type
             ),
         )
 
@@ -222,12 +245,13 @@ class Seq2SeqTransformer(nn.Module):
             activation=config.activation,
             bias=config.ff_bias,
             mlp_type=config.mlp_type,
+            norm_type=config.norm_type,
         )
         self.decoder = nn.TransformerDecoder(
             decoder_layer,
             num_layers=config.dec_layers,
-            norm=nn.LayerNorm(
-                config.d_model, eps=config.layernorm_eps, bias=config.ff_bias
+            norm=get_norm(
+                config.d_model, config.layernorm_eps, config.ff_bias, config.norm_type
             ),
         )
 

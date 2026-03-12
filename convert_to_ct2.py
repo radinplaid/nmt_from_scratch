@@ -66,18 +66,21 @@ def set_layer_norm(spec, state_dict, prefix):
             spec.gamma = weight.detach().float().cpu().numpy()
         else:
             spec.gamma = weight.numpy()
-    if bias is not None:
-        if hasattr(bias, "detach"):
-            spec.beta = bias.detach().float().cpu().numpy()
-        else:
-            spec.beta = bias.numpy()
-    elif weight is not None:
-        # Fill with zeros if bias is missing
-        if hasattr(weight, "detach"):
-            w = weight.detach().float().cpu().numpy()
-        else:
-            w = weight.numpy()
-        spec.beta = np.zeros(w.shape[0], dtype=np.float32)
+    
+    # Only set beta if the spec supports it (RMSNorm spec doesn't have beta)
+    if hasattr(spec, "beta"):
+        if bias is not None:
+            if hasattr(bias, "detach"):
+                spec.beta = bias.detach().float().cpu().numpy()
+            else:
+                spec.beta = bias.numpy()
+        elif weight is not None:
+            # Fill with zeros if bias is missing
+            if hasattr(weight, "detach"):
+                w = weight.detach().float().cpu().numpy()
+            else:
+                w = weight.numpy()
+            spec.beta = np.zeros(w.shape[0], dtype=np.float32)
 
 
 def _make_sinusoidal_position_encodings(max_len, d_model):
@@ -206,6 +209,7 @@ def main():
     )
 
     is_gated = getattr(model_cfg, "mlp_type", "standard") == "gated"
+    use_rms_norm = getattr(model_cfg, "norm_type", "layernorm") == "rmsnorm"
 
     encoder_spec = ctranslate2.specs.TransformerEncoderSpec(
         num_layers=model_cfg.enc_layers,
@@ -213,6 +217,7 @@ def main():
         pre_norm=True,
         activation=ct2_activation,
         ffn_glu=is_gated,
+        rms_norm=use_rms_norm,
     )
     decoder_spec = ctranslate2.specs.TransformerDecoderSpec(
         num_layers=model_cfg.dec_layers,
@@ -220,6 +225,7 @@ def main():
         pre_norm=True,
         activation=ct2_activation,
         ffn_glu=is_gated,
+        rms_norm=use_rms_norm,
     )
 
     # ... mapping ...

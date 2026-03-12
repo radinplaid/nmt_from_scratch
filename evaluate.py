@@ -1,4 +1,5 @@
 import argparse
+from time import time
 from quickmt import Translator
 from config import load_config
 import sacrebleu
@@ -72,9 +73,12 @@ def main():
         )
 
     print(f"Translating {len(src_lines)} lines...")
+    t1 = time()
     hypotheses = translator(
         src_lines, beam_size=args.beam_size, max_batch_size=args.batch_size
     )
+    t2 = time()
+    print(f"Translation time: {(t2 - t1):.2f} seconds")
 
     # Metrics
     bleu = sacrebleu.corpus_bleu(hypotheses, [ref_lines])

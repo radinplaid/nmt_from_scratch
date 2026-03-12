@@ -115,6 +115,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         lr=train_cfg.lr,
         weight_decay=train_cfg.weight_decay,
         eps=train_cfg.adam_eps,
+        betas = (train_cfg.adam_beta1, train_cfg.adam_beta2)
     )
 
     # Scheduler

@@ -17,8 +17,9 @@ class ModelConfig:
     activation: str = "gelu"
     use_checkpoint: bool = False
     ff_bias: bool = False
-    mlp_type: str = "standard"  # "standard" or "gated"
+    mlp_type: str = "gated"  # "standard" or "gated"
     layernorm_eps: float = 1e-5
+    norm_type: str = "rmsnorm"  # "layernorm" or "rmsnorm"
 
     # Special Tokens
     pad_id: int = 0
@@ -46,7 +47,7 @@ class DataConfig:
 
     # Tokenizer
     char_coverage: float = 0.9999
-    input_sentence_size: int = 5_000_000
+    input_sentence_size: int = 10_000_000
 
     @property
     def tokenizer_prefix_src(self) -> str:
@@ -57,7 +58,7 @@ class DataConfig:
         return os.path.join(self.experiment_name, "tokenizer_tgt")
 
     # Streaming & Batching
-    max_tokens_per_batch: int = 4000
+    max_tokens_per_batch: int = 6000
     buffer_size: int = 50000
     num_workers: int = 2
     prefetch_factor: int = 64
@@ -76,6 +77,8 @@ class TrainConfig:
     weight_decay: float = 0.01
     adam_eps: float = 1e-6
     label_smoothing: float = 0.1
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.998
 
     # Scheduler
     scheduler_type: str = "inv_sqrt"  # "inv_sqrt" or "cosine"
