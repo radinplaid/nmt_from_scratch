@@ -1,10 +1,10 @@
 model:
   d_model: 384
-  enc_layers: 12
+  ffn_dim: 1536
+  enc_layers: 8
   dec_layers: 2
   n_heads: 8
-  ffn_dim: 384
-  max_len: 256
+  max_len: 512
   vocab_size: 20000
   mlp_type: "gated"
   activation: "gelu"
@@ -32,6 +32,6 @@ train:
   precision: "bf16"
 
 export:
-  k: 4
+  k: 5
   export_int8: false
   quantization: "int8"

@@ -1,6 +1,7 @@
 import torch
 import os
 import argparse
+import json
 from safetensors.torch import load_file, save_file
 from config import load_config
 from model import Seq2SeqTransformer
@@ -18,21 +19,39 @@ def main():
         os.path.join(args.experiment_dir, "config.yaml")
     )
 
-    # 1. Find the last k models, k defined in export_cfg
-    if not os.path.exists(train_cfg.checkpoint_dir):
-        print(f"Directory {train_cfg.checkpoint_dir} not found.")
-        return
+    # 1. Find the best k models based on validation perplexity
+    metrics_path = os.path.join(args.experiment_dir, "metrics.jsonl")
+    if os.path.exists(metrics_path):
+        print(f"Reading metrics from {metrics_path}")
+        metrics = []
+        with open(metrics_path, "r") as f:
+            for line in f:
+                metrics.append(json.loads(line))
+        
+        # Sort by perplexity (ppl) ascending (lower is better)
+        metrics.sort(key=lambda x: x.get("ppl", float("inf")))
+        
+        best_steps = [m["step"] for m in metrics[: export_cfg.k]]
+        selected = [f"model_{step}.safetensors" for step in best_steps]
+        
+        # Verify files exist
+        selected = [f for f in selected if os.path.exists(os.path.join(train_cfg.checkpoint_dir, f))]
+        print(f"Selected {len(selected)} best checkpoints based on PPL.")
+    else:
+        print(f"Metrics file {metrics_path} not found. Falling back to last k checkpoints.")
+        if not os.path.exists(train_cfg.checkpoint_dir):
+            print(f"Directory {train_cfg.checkpoint_dir} not found.")
+            return
 
-    checkpoints = [
-        f
-        for f in os.listdir(train_cfg.checkpoint_dir)
-        if f.startswith("model_") and f.endswith(".safetensors") and "_int8" not in f
-    ]
+        checkpoints = [
+            f
+            for f in os.listdir(train_cfg.checkpoint_dir)
+            if f.startswith("model_") and f.endswith(".safetensors") and "_int8" not in f
+        ]
 
-    # Sort by step number
-    checkpoints.sort(key=lambda x: int(x.split("_")[1].split(".")[0]), reverse=True)
-
-    selected = checkpoints[: export_cfg.k]
+        # Sort by step number
+        checkpoints.sort(key=lambda x: int(x.split("_")[1].split(".")[0]), reverse=True)
+        selected = checkpoints[: export_cfg.k]
 
     if not selected:
         print("No model files found.")
@@ -101,9 +120,17 @@ def main():
         # Prepare model for Post-Training Quantization (PTQ)
         print("Preparing model for Post-Training Quantization (PTQ)...")
         # Set quantization config
-        model.qconfig = torch.ao.quantization.get_default_qconfig(
-            export_cfg.qconfig_backend
-        )
+        if export_cfg.qconfig_backend == "fbgemm":
+            # Use a more robust qconfig for x86
+            model.qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
+            # Histogram observer is generally better for activations in Transformers
+            model.qconfig.activation = torch.ao.quantization.HistogramObserver.with_args(
+                reduce_range=True
+            )
+        else:
+            model.qconfig = torch.ao.quantization.get_default_qconfig(
+                export_cfg.qconfig_backend
+            )
 
         # Disable quantization for Embedding
         for name, module in model.named_modules():
@@ -118,9 +145,41 @@ def main():
 
         # Convert and Save
         model.convert_to_int8()
+        int8_state_dict = model.state_dict()
         int8_output = f"{export_cfg.output_prefix}_int8.pt"
-        torch.save({"model_state_dict": model.state_dict()}, int8_output)
+        torch.save({"model_state_dict": int8_state_dict}, int8_output)
         print(f"Saved calibrated INT8 model to {int8_output}")
+
+        # Also save as safetensors (dequantized) for easier loading
+        st_int8_output = f"{export_cfg.output_prefix}_int8.safetensors"
+        dequantized_state_dict = {}
+        for k, v in int8_state_dict.items():
+            # Handle packed params
+            if k.endswith("._packed_params._packed_params") and isinstance(v, tuple):
+                # This is a bit tricky for safetensors as we need to map it back to .weight and .bias
+                prefix = k.replace("._packed_params._packed_params", "")
+                qweight, bias = v
+                dequantized_state_dict[f"{prefix}.weight"] = (
+                    qweight.dequantize() if hasattr(qweight, "dequantize") else qweight
+                )
+                if bias is not None:
+                    dequantized_state_dict[f"{prefix}.bias"] = bias
+            elif hasattr(v, "dequantize"):
+                dequantized_state_dict[k] = v.dequantize()
+            else:
+                dequantized_state_dict[k] = v
+        
+        # Remove scale and zero_point if they exist as they are now baked into the dequantized weights
+        # Also remove any non-tensor values (like .dtype) which safetensors doesn't support
+        keys_to_remove = [
+            k for k, v in dequantized_state_dict.items()
+            if k.endswith(".scale") or k.endswith(".zero_point") or not isinstance(v, torch.Tensor)
+        ]
+        for k in keys_to_remove:
+            del dequantized_state_dict[k]
+
+        save_file(dequantized_state_dict, st_int8_output)
+        print(f"Saved dequantized INT8 model to {st_int8_output}")
 
 
 if __name__ == "__main__":

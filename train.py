@@ -1,6 +1,7 @@
 import math
 import os
 import time
+import json
 from datetime import datetime, timedelta
 
 import sacrebleu
@@ -141,9 +142,16 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     global_step = 0
 
-    def save_checkpoint(step, model, optimizer, scheduler, config):
+    def save_checkpoint(step, model, optimizer, scheduler, config, val_metrics=None):
         # Ensure experiment directory exists
         os.makedirs(config.experiment_name, exist_ok=True)
+
+        # Save validation metrics to jsonl
+        if val_metrics is not None:
+            metrics_path = os.path.join(config.experiment_name, "metrics.jsonl")
+            with open(metrics_path, "a") as f:
+                metric_entry = {"step": step, **val_metrics}
+                f.write(json.dumps(metric_entry) + "\n")
 
         if not os.path.exists(config.checkpoint_dir):
             os.makedirs(config.checkpoint_dir)
@@ -409,7 +417,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
                             step=global_step,
                             context={"subset": "dev"},
                         )
-                    save_checkpoint(global_step, model, optimizer, scheduler, train_cfg)
+                    save_checkpoint(global_step, model, optimizer, scheduler, train_cfg, val_metrics=val_metrics)
 
                 if global_step >= train_cfg.max_steps:
                     break
