@@ -12,7 +12,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Average the last k checkpoints and save as safetensors/INT8"
     )
-    parser.add_argument("--experiment_dir", type=str, required=True, help="Path to experiment directory")
+    parser.add_argument(
+        "--experiment_dir", type=str, required=True, help="Path to experiment directory"
+    )
     args = parser.parse_args()
 
     model_cfg, data_cfg, train_cfg, export_cfg = load_config(
@@ -27,18 +29,25 @@ def main():
         with open(metrics_path, "r") as f:
             for line in f:
                 metrics.append(json.loads(line))
-        
+
         # Sort by perplexity (ppl) ascending (lower is better)
         metrics.sort(key=lambda x: x.get("ppl", float("inf")))
-        
-        best_steps = [m["step"] for m in metrics[: export_cfg.k]]
+
+        best_steps = [m["step"] for m in metrics]
         selected = [f"model_{step}.safetensors" for step in best_steps]
-        
+
         # Verify files exist
-        selected = [f for f in selected if os.path.exists(os.path.join(train_cfg.checkpoint_dir, f))]
+        selected = [
+            f
+            for f in selected
+            if os.path.exists(os.path.join(train_cfg.checkpoint_dir, f))
+        ]
+        selected = selected[: export_cfg.k]
         print(f"Selected {len(selected)} best checkpoints based on PPL.")
     else:
-        print(f"Metrics file {metrics_path} not found. Falling back to last k checkpoints.")
+        print(
+            f"Metrics file {metrics_path} not found. Falling back to last k checkpoints."
+        )
         if not os.path.exists(train_cfg.checkpoint_dir):
             print(f"Directory {train_cfg.checkpoint_dir} not found.")
             return
@@ -46,7 +55,9 @@ def main():
         checkpoints = [
             f
             for f in os.listdir(train_cfg.checkpoint_dir)
-            if f.startswith("model_") and f.endswith(".safetensors") and "_int8" not in f
+            if f.startswith("model_")
+            and f.endswith(".safetensors")
+            and "_int8" not in f
         ]
 
         # Sort by step number
@@ -124,8 +135,8 @@ def main():
             # Use a more robust qconfig for x86
             model.qconfig = torch.ao.quantization.get_default_qconfig("fbgemm")
             # Histogram observer is generally better for activations in Transformers
-            model.qconfig.activation = torch.ao.quantization.HistogramObserver.with_args(
-                reduce_range=True
+            model.qconfig.activation = (
+                torch.ao.quantization.HistogramObserver.with_args(reduce_range=True)
             )
         else:
             model.qconfig = torch.ao.quantization.get_default_qconfig(
@@ -168,12 +179,15 @@ def main():
                 dequantized_state_dict[k] = v.dequantize()
             else:
                 dequantized_state_dict[k] = v
-        
+
         # Remove scale and zero_point if they exist as they are now baked into the dequantized weights
         # Also remove any non-tensor values (like .dtype) which safetensors doesn't support
         keys_to_remove = [
-            k for k, v in dequantized_state_dict.items()
-            if k.endswith(".scale") or k.endswith(".zero_point") or not isinstance(v, torch.Tensor)
+            k
+            for k, v in dequantized_state_dict.items()
+            if k.endswith(".scale")
+            or k.endswith(".zero_point")
+            or not isinstance(v, torch.Tensor)
         ]
         for k in keys_to_remove:
             del dequantized_state_dict[k]

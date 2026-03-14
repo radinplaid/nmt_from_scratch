@@ -14,8 +14,7 @@ class StreamingTextDataset(IterableDataset):
 
     def __init__(
         self,
-        src_file: str,
-        tgt_file: str,
+        corpora,
         src_sp,
         tgt_sp,
         max_tokens: int,
@@ -23,9 +22,10 @@ class StreamingTextDataset(IterableDataset):
         max_seq_len: int = 512,
         pad_id: int = 0,
         pad_multiple: int = 16,
+        global_step_value=None,
+        infinite: bool = True,
     ):
-        self.src_file = src_file
-        self.tgt_file = tgt_file
+        self.corpora = corpora
         self.src_sp = src_sp
         self.tgt_sp = tgt_sp
         self.max_tokens = max_tokens
@@ -35,80 +35,208 @@ class StreamingTextDataset(IterableDataset):
         self.max_seq_len = max_seq_len
         self.pad_id = pad_id
         self.pad_multiple = pad_multiple
+        self.global_step_value = global_step_value
+        self.infinite = infinite
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
 
-        with (
-            open(self.src_file, "r", encoding="utf-8") as f_src,
-            open(self.tgt_file, "r", encoding="utf-8") as f_tgt,
-        ):
-            pairs = zip(f_src, f_tgt)
+        # Generator for tokenized samples
+        def get_samples():
+            iters = []
+            files_list = []
 
-            if worker_info is not None:
-                # Sharding: each worker reads unique lines
-                pairs = itertools.islice(
-                    pairs, worker_info.id, None, worker_info.num_workers
-                )
-
-            # Generator for tokenized samples
-            def get_samples():
-                for s, t in pairs:
-                    # Limit to prevent Positional Encoding overflow or OOM
-                    s_ids = self.src_sp.encode(
-                        s.strip(), out_type=int, add_bos=True, add_eos=True
+            def init_iter(c):
+                f_src = open(c.src_file, "r", encoding="utf-8")
+                f_tgt = open(c.tgt_file, "r", encoding="utf-8")
+                pair_iter = zip(f_src, f_tgt)
+                if worker_info is not None:
+                    pair_iter = itertools.islice(
+                        pair_iter, worker_info.id, None, worker_info.num_workers
                     )
-                    t_ids = self.tgt_sp.encode(
-                        t.strip(), out_type=int, add_bos=True, add_eos=True
+                return f_src, f_tgt, pair_iter
+
+            for c in self.corpora:
+                f_src, f_tgt, p_iter = init_iter(c)
+                iters.append(p_iter)
+                files_list.append((f_src, f_tgt))
+
+            try:
+                logged_corpora = set()
+                active_corpora = set(range(len(self.corpora)))
+                corpus_epochs = {i: 0 for i in range(len(self.corpora))}
+
+                while active_corpora:
+                    current_step = (
+                        self.global_step_value.value if self.global_step_value else 0
                     )
 
-                    # If either sequence is too long, drop it
-                    if (
-                        len(s_ids) <= self.max_seq_len
-                        and len(t_ids) <= self.max_seq_len
-                    ):
-                        yield torch.tensor(s_ids), torch.tensor(t_ids)
+                    available_indices = []
+                    to_remove = []
+                    for i in active_corpora:
+                        if current_step >= self.corpora[i].stop_step:
+                            to_remove.append(i)
+                        elif current_step >= self.corpora[i].start_step:
+                            available_indices.append(i)
 
-            samples = get_samples()
+                    if to_remove:
+                        for i in to_remove:
+                            if i in active_corpora:
+                                active_corpora.remove(i)
+                                is_main_worker = (
+                                    True
+                                    if worker_info is None or worker_info.id == 0
+                                    else False
+                                )
+                                if is_main_worker:
+                                    import datetime
 
-            while True:
-                # 1. Fill buffer
-                buffer = list(itertools.islice(samples, self.buffer_size))
-                if not buffer:
-                    break
+                                    timestamp = datetime.datetime.now().strftime(
+                                        "%H:%M:%S"
+                                    )
+                                    print(
+                                        f"[{timestamp}] Corpus stopped (reached stop_step): {self.corpora[i].src_file} (Stop step: {self.corpora[i].stop_step})"
+                                    )
+                                # Close files
+                                try:
+                                    f_src, f_tgt = files_list[i]
+                                    f_src.close()
+                                    f_tgt.close()
+                                except Exception:
+                                    pass
 
-                # 2. Local shuffle for randomness
-                random.shuffle(buffer)
+                    if not available_indices:
+                        if not self.infinite or not active_corpora:
+                            break
+                        import time
 
-                # 3. Sort by length to minimize padding
-                buffer.sort(key=lambda x: max(len(x[0]), len(x[1])))
+                        time.sleep(1)
+                        continue
 
-                # 4. Create batches based on token budget
-                batches = []
-                batch_srcs, batch_tgts = [], []
-                max_len_in_batch = 0
+                    for i in available_indices:
+                        if i not in logged_corpora:
+                            is_main_worker = (
+                                True
+                                if worker_info is None or worker_info.id == 0
+                                else False
+                            )
+                            if is_main_worker:
+                                import datetime
 
-                for s, t in buffer:
-                    length = max(len(s), len(t))
-                    new_max_len = max(max_len_in_batch, length)
-                    new_cost = (len(batch_srcs) + 1) * new_max_len
+                                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                                print(
+                                    f"[{timestamp}] Active corpus: {self.corpora[i].src_file} (Weight: {self.corpora[i].weight}, Start step: {self.corpora[i].start_step}, Stop step: {self.corpora[i].stop_step})"
+                                )
+                            logged_corpora.add(i)
 
-                    if new_cost > self.max_tokens and batch_srcs:
-                        batches.append(self._collate(batch_srcs, batch_tgts))
-                        batch_srcs, batch_tgts = [], []
-                        max_len_in_batch = 0
+                    schedule = []
+                    for i in available_indices:
+                        schedule.extend([i] * self.corpora[i].weight)
+                    random.shuffle(schedule)
 
-                    batch_srcs.append(s)
-                    batch_tgts.append(t)
-                    max_len_in_batch = max(max_len_in_batch, length)
+                    for c_idx in schedule:
+                        if c_idx not in active_corpora:
+                            continue
 
-                if batch_srcs:
+                        try:
+                            s, t = next(iters[c_idx])
+                        except StopIteration:
+                            if not self.infinite:
+                                active_corpora.remove(c_idx)
+                                continue
+
+                            corpus_epochs[c_idx] += 1
+                            is_main_worker = (
+                                True
+                                if worker_info is None or worker_info.id == 0
+                                else False
+                            )
+                            if is_main_worker:
+                                import datetime
+
+                                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                                print(
+                                    f"[{timestamp}] Corpus {self.corpora[c_idx].src_file} completed epoch {corpus_epochs[c_idx]} (Weight: {self.corpora[c_idx].weight}, loop restarting)"
+                                )
+
+                            # Close previous iter files
+                            old_f_src, old_f_tgt = files_list[c_idx]
+                            try:
+                                old_f_src.close()
+                                old_f_tgt.close()
+                            except Exception:
+                                pass
+
+                            f_src, f_tgt, p_iter = init_iter(self.corpora[c_idx])
+                            iters[c_idx] = p_iter
+                            files_list[c_idx] = (f_src, f_tgt)
+
+                            try:
+                                s, t = next(iters[c_idx])
+                            except StopIteration:
+                                active_corpora.remove(c_idx)
+                                continue
+
+                        s_ids = self.src_sp.encode(
+                            s.strip(), out_type=int, add_bos=True, add_eos=True
+                        )
+                        t_ids = self.tgt_sp.encode(
+                            t.strip(), out_type=int, add_bos=True, add_eos=True
+                        )
+
+                        if (
+                            len(s_ids) <= self.max_seq_len
+                            and len(t_ids) <= self.max_seq_len
+                        ):
+                            yield torch.tensor(s_ids), torch.tensor(t_ids)
+            finally:
+                for f_src, f_tgt in files_list:
+                    try:
+                        f_src.close()
+                        f_tgt.close()
+                    except Exception:
+                        pass
+
+        samples = get_samples()
+
+        while True:
+            # 1. Fill buffer
+            buffer = list(itertools.islice(samples, self.buffer_size))
+            if not buffer:
+                break
+
+            # 2. Local shuffle for randomness
+            random.shuffle(buffer)
+
+            # 3. Sort by length to minimize padding
+            buffer.sort(key=lambda x: max(len(x[0]), len(x[1])))
+
+            # 4. Create batches based on token budget
+            batches = []
+            batch_srcs, batch_tgts = [], []
+            max_len_in_batch = 0
+
+            for s, t in buffer:
+                length = max(len(s), len(t))
+                new_max_len = max(max_len_in_batch, length)
+                new_cost = (len(batch_srcs) + 1) * new_max_len
+
+                if new_cost > self.max_tokens and batch_srcs:
                     batches.append(self._collate(batch_srcs, batch_tgts))
+                    batch_srcs, batch_tgts = [], []
+                    max_len_in_batch = 0
 
-                # 5. Shuffle the created batches to eliminate length bias
-                random.shuffle(batches)
-                for b_src, b_tgt in batches:
-                    yield b_src, b_tgt
+                batch_srcs.append(s)
+                batch_tgts.append(t)
+                max_len_in_batch = max(max_len_in_batch, length)
+
+            if batch_srcs:
+                batches.append(self._collate(batch_srcs, batch_tgts))
+
+            # 5. Shuffle the created batches to eliminate length bias
+            random.shuffle(batches)
+            for b_src, b_tgt in batches:
+                yield b_src, b_tgt
 
     def _collate(self, srcs, tgts):
         src_padded = torch.nn.utils.rnn.pad_sequence(
@@ -258,7 +386,9 @@ def load_file_lines(path, limit=None):
     return lines
 
 
-def PrepareData(model_cfg, data_cfg, train_cfg):
+def PrepareData(model_cfg, data_cfg, train_cfg, global_step_value=None):
+    from config import CorpusConfig
+
     # 1. Train Tokenizers (if not exists)
     vocab_size = model_cfg.vocab_size
     model_prefix_src = data_cfg.tokenizer_prefix_src
@@ -266,10 +396,16 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
 
     os.makedirs(data_cfg.experiment_name, exist_ok=True)
 
+    if not data_cfg.corpora:
+        raise ValueError("No corpora provided in data_cfg")
+
+    tokenizer_train_src = data_cfg.corpora[0].src_file
+    tokenizer_train_tgt = data_cfg.corpora[0].tgt_file
+
     if not os.path.exists(f"{model_prefix_src}.model"):
         print("Training Source Tokenizer...")
         train_tokenizer(
-            data_cfg.src_train_path,
+            tokenizer_train_src,
             model_prefix_src,
             vocab_size,
             char_coverage=data_cfg.char_coverage,
@@ -283,7 +419,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
     if not os.path.exists(f"{model_prefix_tgt}.model"):
         print("Training Target Tokenizer...")
         train_tokenizer(
-            data_cfg.tgt_train_path,
+            tokenizer_train_tgt,
             model_prefix_tgt,
             vocab_size,
             char_coverage=data_cfg.char_coverage,
@@ -304,8 +440,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
     max_tokens = data_cfg.max_tokens_per_batch
 
     train_dataset = StreamingTextDataset(
-        data_cfg.src_train_path,
-        data_cfg.tgt_train_path,
+        data_cfg.corpora,
         src_sp,
         tgt_sp,
         max_tokens,
@@ -313,11 +448,14 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
         max_seq_len=model_cfg.max_len,
         pad_id=model_cfg.pad_id,
         pad_multiple=data_cfg.pad_multiple,
+        global_step_value=global_step_value,
     )
 
+    dev_corpora = [
+        CorpusConfig(src_file=data_cfg.src_dev_path, tgt_file=data_cfg.tgt_dev_path)
+    ]
     dev_dataset = StreamingTextDataset(
-        data_cfg.src_dev_path,
-        data_cfg.tgt_dev_path,
+        dev_corpora,
         src_sp,
         tgt_sp,
         max_tokens,
@@ -325,6 +463,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg):
         max_seq_len=model_cfg.max_len,
         pad_id=model_cfg.pad_id,
         pad_multiple=data_cfg.pad_multiple,
+        infinite=False,
     )
 
     # 4. Loaders

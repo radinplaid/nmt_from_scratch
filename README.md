@@ -4,12 +4,6 @@ Experimenting with training Neural Machine Translation (NMT) models from scratch
 
 ## Key Features
 
-### 🏛️ Model Architecture
-- **Vanilla Transformer**: Implementation based on `nn.Transformer` with configurable layers, heads, and dimensions
-- **Pre-Norm Configuration**: Uses `norm_first=True` for better training stability and performance
-- **GELU Activation**: Employs Gaussian Error Linear Units for non-linearities
-- **Positional Encoding**: Sinusoidal positional embeddings for sequence awareness
-- **Weight Sharing**: Support for tying token embeddings and generator weights
 
 ### 🚀 Performance & Optimization
 
@@ -23,17 +17,19 @@ Experimenting with training Neural Machine Translation (NMT) models from scratch
 - **Token-Based Batching**: Dynamic batching with bucket sorting to minimize padding and maximize throughput
 - **SentencePiece Tokenization**: Integrated support for training and using SentencePiece (unigram/BPE) models
 - **Multi-worker Sharding**: Efficient data loading with automatic sharding across multiple CPU workers
+* **Multi-dataset training**: Train on multiple datasets at once starting/stopping at specific steps
 
 ### 📈 Evaluation & Monitoring
 
-- **Real-time Metrics**: Tracking of Loss, Perplexity (PPL), and Token Accuracy
+- **Real-time Metrics**: Tracking of Loss, Perplexity (PPL), Token Accuracy etc.
 - **Translation Quality**: In-training evaluation using **BLEU** and **ChrF** scores via `sacrebleu`
 - **Aim Tracking**: Full integration with `aim` for experiment tracking and visualization
 
 ### 🛠️ Inference & Deployment
 
-- **CTranslate2 Export**: Script to convert PyTorch models to highly optimized CTranslate2 format for production deployment
 - **Model Averaging**: Tool for stochastic weight averaging of multiple checkpoints to improve generalization
+- **CTranslate2 Export**: Script to convert PyTorch models to highly optimized CTranslate2 format for production deployment
+
 
 ## Dependencies
 
@@ -51,27 +47,27 @@ This is a start but there is still some work to be done:
 
 * Validation metrics do not seem to be calculated correctly
 * The `generate` and `beam_search` methods in `model.py` does not seem to be implemented correctly
-* All model files (tokenizers vocab files etc) should be stored in a single model run directory (maybe named after the experiment)
-* Rather than truncating inputs that are too long, the dataloader should probably drop/ignore them
-* Add code to resume training from checkpoint
-* ... etc
+* ... etc (see open issues)
 
 
 ## Usage
 
 ```bash
-# Edit config to your liking
-vim configs/faen-small.yaml
+# Create a config file (see the examples)
+vim configs/faen-tiny.yaml
 
 # Train
-python train.py --config configs/faen-small.yaml 
+python train.py --config configs/faen-tiny.yaml 
 
 # Average checkpoints and quantize the model
-python average_checkpoints.py --experiment_dir faen-small
+python average_checkpoints.py --experiment_dir ./faen-tiny   
 
 # Convert to CTranslate2 format
-python convert_to_ct2.py --experiment_dir faen-small
+python convert_to_ct2.py --experiment_dir ./faen-tiny   
 
 # Evaluate (uses quickmt library, https://github.com/quickmt/quickmt)
-python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cuda --batch_size 8 --beam_size 5 --model ./faen-small/exported_model
+python evaluate.py --src_file data/flores.fa --ref_file data/flores.en --device cuda --batch_size 8 --beam_size 5 --model ./faen-tiny/exported_model
+
+# Using pytorch
+python evaluate-pytorch.py --config configs/faen-tiny.yaml --model faen-tiny/averaged_model.safetensors --src_file data/flores.fa --ref_file data/flores.en --batch_size 8 --beam_size 5 --device cpu
 ```

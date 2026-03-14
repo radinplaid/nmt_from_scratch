@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from aim import Run
-from safetensors.torch import save_file
+from safetensors.torch import save_file, load_file
 from shutil import copyfile
 
 from config import DataConfig, ModelConfig, TrainConfig
@@ -34,6 +34,11 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     if train_cfg is None:
         train_cfg = TrainConfig()
 
+    # Remove metrics file if exists
+    metrics_path = os.path.join(train_cfg.experiment_name, "metrics.jsonl")
+    if os.path.exists(metrics_path):
+        os.remove(metrics_path)
+
     # Device selection
     if train_cfg.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,17 +55,24 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
             torch.set_float32_matmul_precision("high")
 
     run = Run(repo=train_cfg.aim_repo, experiment=train_cfg.experiment_name)
+    import dataclasses
+
     run["hparams"] = {
-        **{f"model_{k}": v for k, v in model_cfg.__dict__.items()},
-        **{f"data_{k}": v for k, v in data_cfg.__dict__.items()},
-        **{f"train_{k}": v for k, v in train_cfg.__dict__.items()},
+        **{f"model_{k}": v for k, v in dataclasses.asdict(model_cfg).items()},
+        **{f"data_{k}": v for k, v in dataclasses.asdict(data_cfg).items()},
+        **{f"train_{k}": v for k, v in dataclasses.asdict(train_cfg).items()},
     }
 
     # Data
     print(f"{get_time_info()} Preparing data...")
 
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    global_step_value = ctx.Value("i", 0)
+
     train_loader, dev_loader, src_sp, tgt_sp = PrepareData(
-        model_cfg, data_cfg, train_cfg
+        model_cfg, data_cfg, train_cfg, global_step_value=global_step_value
     )
 
     # Model
@@ -71,6 +83,43 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     # Convert model to precision for reduced memory footprint
     if device.type == "cuda" and train_cfg.precision == "bf16":
         model = model.to(dtype=torch.bfloat16)
+
+    # Checkpoint loading (weights)
+    if train_cfg.resume_from:
+        checkpoint_path = train_cfg.resume_from
+        weights_path = None
+
+        if checkpoint_path.endswith(".safetensors"):
+            weights_path = checkpoint_path
+        elif checkpoint_path.endswith(".pt"):
+            # Could be a full checkpoint or just weights
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            if (
+                isinstance(checkpoint, dict)
+                and "optimizer_state_dict" not in checkpoint
+            ):
+                # Likely just weights in .pt
+                model.load_state_dict(checkpoint)
+                print(f"{get_time_info()} Loaded weights from {checkpoint_path}")
+            elif isinstance(checkpoint, dict) and "optimizer_state_dict" in checkpoint:
+                # Full checkpoint state, find weights
+                step = checkpoint.get("step", 0)
+                # Try to find model_{step}.safetensors in the same directory
+                weights_path = os.path.join(
+                    os.path.dirname(checkpoint_path), f"model_{step}.safetensors"
+                )
+                if not os.path.exists(weights_path):
+                    print(
+                        f"{get_time_info()} Warning: weights file not found for checkpoint at {weights_path}"
+                    )
+                    weights_path = None
+
+        if weights_path:
+            print(f"{get_time_info()} Loading weights from {weights_path}")
+            state_dict = load_file(weights_path, device=device.type)
+            # Remove _orig_mod. prefix if present in state_dict (shouldn't be, but safe)
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+            model.load_state_dict(state_dict)
 
     model = torch.compile(model)
 
@@ -116,7 +165,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         lr=train_cfg.lr,
         weight_decay=train_cfg.weight_decay,
         eps=train_cfg.adam_eps,
-        betas = (train_cfg.adam_beta1, train_cfg.adam_beta2)
+        betas=(train_cfg.adam_beta1, train_cfg.adam_beta2),
     )
 
     # Scheduler
@@ -141,6 +190,23 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     global_step = 0
+
+    # Checkpoint loading (state)
+    if (
+        train_cfg.resume_from
+        and train_cfg.resume_from.endswith(".pt")
+        and not train_cfg.reset_optimizer
+    ):
+        checkpoint = torch.load(train_cfg.resume_from, map_location=device)
+        if isinstance(checkpoint, dict) and "optimizer_state_dict" in checkpoint:
+            print(
+                f"{get_time_info()} Resuming optimizer and scheduler state from {train_cfg.resume_from}"
+            )
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            global_step = checkpoint.get("step", 0)
+            global_step_value.value = global_step
+            print(f"{get_time_info()} Resumed from step {global_step}")
 
     def save_checkpoint(step, model, optimizer, scheduler, config, val_metrics=None):
         # Ensure experiment directory exists
@@ -340,124 +406,128 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     optimizer.zero_grad()
     autocast_dtype = torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
 
-    for epoch in range(train_cfg.epochs):
-        start_time = time.time()
-        total_loss_sum = 0
-        total_tokens_epoch = 0
-        batch_src_tokens = 0
-        batch_tgt_tokens = 0
-        last_log_time = time.time()
+    start_time = time.time()
+    total_loss_sum = 0
+    total_tokens_trained = 0
+    batch_src_tokens = 0
+    batch_tgt_tokens = 0
+    last_log_time = time.time()
 
-        # Token-based accumulation state
-        accum_loss = 0
-        accum_tokens = 0
-        last_batch_loss = 0.0
+    # Token-based accumulation state
+    accum_loss = 0
+    accum_tokens = 0
+    last_batch_loss = 0.0
 
-        for batch_idx, (src, tgt) in enumerate(train_loader):
-            # Use non_blocking for async data transfer
-            src, tgt = (
-                src.to(device, non_blocking=True),
-                tgt.to(device, non_blocking=True),
-            )
-
-            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                loss, num_tokens = model(
-                    src, tgt, label_smoothing=train_cfg.label_smoothing
-                )
-
-                # Handle DataParallel output (vectors per GPU)
-                if loss.ndim > 0:
-                    loss = loss.sum()
-                if num_tokens.ndim > 0:
-                    num_tokens = num_tokens.sum()
-
-            loss.backward()
-            accum_loss += loss.item()
-            accum_tokens += num_tokens.item()
-
-            total_loss_sum += loss.item()
-            total_tokens_epoch += num_tokens.item()
-
-            # Throughput tracking
-            batch_src_tokens += (src != model_cfg.pad_id).sum().item()
-            batch_tgt_tokens += (tgt != model_cfg.pad_id).sum().item()
-
-            if (batch_idx + 1) % train_cfg.accum_steps == 0:
-                # Scale gradients by total number of tokens in the accumulation bucket
-                for p in model.parameters():
-                    if p.grad is not None:
-                        p.grad.data.div_(max(1, accum_tokens))
-
-                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-
-                last_batch_loss = accum_loss / max(1, accum_tokens)
-                accum_loss = 0
-                accum_tokens = 0
-                global_step += 1
-
-                # Validation and Checkpointing
-                if global_step % train_cfg.eval_steps == 0:
-                    val_metrics = validate(
-                        model,
-                        dev_loader,
-                        src_sp,
-                        tgt_sp,
-                        device,
-                        train_cfg,
-                        data_cfg,
-                        model_cfg,
-                    )
-                    for k, v in val_metrics.items():
-                        run.track(
-                            v,
-                            name=f"val_{k}",
-                            step=global_step,
-                            context={"subset": "dev"},
-                        )
-                    save_checkpoint(global_step, model, optimizer, scheduler, train_cfg, val_metrics=val_metrics)
-
-                if global_step >= train_cfg.max_steps:
-                    break
-
-            # Progress Print
-            if batch_idx % train_cfg.log_steps == 0:
-                curr_lr = optimizer.param_groups[0]["lr"]
-                elapsed = time.time() - last_log_time
-                in_tok_s = batch_src_tokens / max(1e-6, elapsed)
-                out_tok_s = batch_tgt_tokens / max(1e-6, elapsed)
-
-                print(
-                    f"{get_time_info()} Epoch {epoch + 1} | Batch {batch_idx} | Step {global_step} | "
-                    f"Loss: {last_batch_loss:.4f} | LR: {curr_lr:.6f} | "
-                    f"In: {in_tok_s:.0f} tok/s | Out: {out_tok_s:.0f} tok/s"
-                )
-
-                # Aim tracking
-                run.track(
-                    last_batch_loss,
-                    name="loss",
-                    step=global_step,
-                    context={"subset": "train"},
-                )
-                run.track(curr_lr, name="lr", step=global_step)
-                run.track(in_tok_s, name="input_tokens_per_sec", step=global_step)
-                run.track(out_tok_s, name="output_tokens_per_sec", step=global_step)
-
-                # Reset throughput counters
-                batch_src_tokens = 0
-                batch_tgt_tokens = 0
-                last_log_time = time.time()
-
-        avg_loss = total_loss_sum / max(1, total_tokens_epoch)
-        print(
-            f"{get_time_info()} Epoch {epoch + 1}/{train_cfg.epochs} Completed | Avg Loss: {avg_loss:.4f} | Epoch Time: {time.time() - start_time:.2f}s"
+    for batch_idx, (src, tgt) in enumerate(train_loader):
+        # Use non_blocking for async data transfer
+        src, tgt = (
+            src.to(device, non_blocking=True),
+            tgt.to(device, non_blocking=True),
         )
 
-        if global_step >= train_cfg.max_steps:
-            break
+        with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+            loss, num_tokens = model(
+                src, tgt, label_smoothing=train_cfg.label_smoothing
+            )
+
+            # Handle DataParallel output (vectors per GPU)
+            if loss.ndim > 0:
+                loss = loss.sum()
+            if num_tokens.ndim > 0:
+                num_tokens = num_tokens.sum()
+
+        loss.backward()
+        accum_loss += loss.item()
+        accum_tokens += num_tokens.item()
+
+        total_loss_sum += loss.item()
+        total_tokens_trained += num_tokens.item()
+
+        # Throughput tracking
+        batch_src_tokens += (src != model_cfg.pad_id).sum().item()
+        batch_tgt_tokens += (tgt != model_cfg.pad_id).sum().item()
+
+        if (batch_idx + 1) % train_cfg.accum_steps == 0:
+            # Scale gradients by total number of tokens in the accumulation bucket
+            for p in model.parameters():
+                if p.grad is not None:
+                    p.grad.data.div_(max(1, accum_tokens))
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+
+            last_batch_loss = accum_loss / max(1, accum_tokens)
+            accum_loss = 0
+            accum_tokens = 0
+            global_step += 1
+            global_step_value.value = global_step
+
+            # Validation and Checkpointing
+            if global_step % train_cfg.eval_steps == 0:
+                val_metrics = validate(
+                    model,
+                    dev_loader,
+                    src_sp,
+                    tgt_sp,
+                    device,
+                    train_cfg,
+                    data_cfg,
+                    model_cfg,
+                )
+                for k, v in val_metrics.items():
+                    run.track(
+                        v,
+                        name=f"val_{k}",
+                        step=global_step,
+                        context={"subset": "dev"},
+                    )
+                save_checkpoint(
+                    global_step,
+                    model,
+                    optimizer,
+                    scheduler,
+                    train_cfg,
+                    val_metrics=val_metrics,
+                )
+
+            if global_step >= train_cfg.max_steps:
+                break
+
+        # Progress Print
+        if batch_idx % train_cfg.log_steps == 0:
+            curr_lr = optimizer.param_groups[0]["lr"]
+            elapsed = time.time() - last_log_time
+            in_tok_s = batch_src_tokens / max(1e-6, elapsed)
+            out_tok_s = batch_tgt_tokens / max(1e-6, elapsed)
+
+            print(
+                f"{get_time_info()} Step {global_step}/{train_cfg.max_steps} | Batch {batch_idx} | "
+                f"Loss: {last_batch_loss:.4f} | LR: {curr_lr:.6f} | "
+                f"In: {in_tok_s:.0f} tok/s | Out: {out_tok_s:.0f} tok/s"
+            )
+
+            # Aim tracking
+            run.track(
+                last_batch_loss,
+                name="loss",
+                step=global_step,
+                context={"subset": "train"},
+            )
+            run.track(curr_lr, name="lr", step=global_step)
+            run.track(in_tok_s, name="input_tokens_per_sec", step=global_step)
+            run.track(out_tok_s, name="output_tokens_per_sec", step=global_step)
+
+            # Reset throughput counters
+            batch_src_tokens = 0
+            batch_tgt_tokens = 0
+            last_log_time = time.time()
+
+    avg_loss = total_loss_sum / max(1, total_tokens_trained)
+    print(
+        f"{get_time_info()} Training Completed | Avg Loss: {avg_loss:.4f} | Total Time: {time.time() - start_time:.2f}s"
+    )
 
     print(f"{get_time_info()} Training complete.")
 
@@ -535,7 +605,7 @@ if __name__ == "__main__":
     if args.config:
         model_cfg, data_cfg, train_cfg, _ = load_config(args.config)
 
-    for i in  (train_cfg, data_cfg, model_cfg):
+    for i in (train_cfg, data_cfg, model_cfg):
         assert i is not None
         print(i)
 
@@ -543,6 +613,6 @@ if __name__ == "__main__":
     os.makedirs(train_cfg.experiment_name, exist_ok=True)
 
     # Copy config to experiment folder
-    copyfile(args.config, os.path.join(train_cfg.experiment_name, "config.yaml")) # type: ignore
+    copyfile(args.config, os.path.join(train_cfg.experiment_name, "config.yaml"))  # type: ignore
 
     train(model_cfg, data_cfg, train_cfg)

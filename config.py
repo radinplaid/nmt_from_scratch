@@ -11,7 +11,7 @@ class ModelConfig:
     dec_layers: int = 2
     n_heads: int = 16
     ffn_dim: int = 4096
-    max_len: int = 512 # Hard filter during data loading
+    max_len: int = 512  # Hard filter during data loading
     dropout: float = 0.1
     vocab_size: int = 32000
     activation: str = "gelu"
@@ -29,6 +29,15 @@ class ModelConfig:
 
 
 @dataclass
+class CorpusConfig:
+    src_file: str
+    tgt_file: str
+    weight: int = 1
+    start_step: int = 0
+    stop_step: int = 1000000000
+
+
+@dataclass
 class DataConfig:
     """Configuration for data loading, preprocessing, and tokenization."""
 
@@ -40,10 +49,13 @@ class DataConfig:
     tgt_lang: str = "en"
 
     # Paths
-    src_train_path: str = "data/train.fa"
-    tgt_train_path: str = "data/train.en"
+    corpora: list["CorpusConfig"] = None  # Will be initialized in __post_init__
     src_dev_path: str = "data/dev.fa"
     tgt_dev_path: str = "data/dev.en"
+
+    def __post_init__(self):
+        if self.corpora is None:
+            self.corpora = []
 
     # Tokenizer
     char_coverage: float = 0.9999
@@ -102,6 +114,10 @@ class TrainConfig:
     val_max_samples: int = 500
     quick_test_samples: int = 5
 
+    # Checkpoint Resume
+    resume_from: str = ""  # Path to .pt or .safetensors checkpoint
+    reset_optimizer: bool = False  # Reset optimizer/scheduler state (for fine-tuning)
+
     @property
     def checkpoint_dir(self) -> str:
         return os.path.join(self.experiment_name, "checkpoints")
@@ -151,7 +167,14 @@ class ExportConfig:
 
 def _from_dict(cls, d):
     valid_fields = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in d.items() if k in valid_fields})
+    kwargs = {}
+    for k, v in d.items():
+        if k in valid_fields:
+            if k == "corpora" and isinstance(v, list):
+                kwargs[k] = [CorpusConfig(**c) if isinstance(c, dict) else c for c in v]
+            else:
+                kwargs[k] = v
+    return cls(**kwargs)
 
 
 def load_config(path: str):
