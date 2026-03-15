@@ -13,7 +13,8 @@ class ModelConfig:
     ffn_dim: int = 4096
     max_len: int = 512  # Hard filter during data loading
     dropout: float = 0.1
-    vocab_size: int = 32000
+    vocab_size_src: int = 32000
+    vocab_size_tgt: int = 32000
     activation: str = "gelu"
     use_checkpoint: bool = False
     ff_bias: bool = False

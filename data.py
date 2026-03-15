@@ -345,21 +345,27 @@ def train_tokenizer(
     print(f"Tokenizer trained: {model_prefix}.model")
 
 
-def load_tokenizers(src_prefix: str, tgt_prefix: str, expected_vocab_size: int = None):
+def load_tokenizers(
+    src_prefix: str,
+    tgt_prefix: str,
+    expected_src_vocab_size: int = None,
+    expected_tgt_vocab_size: int = None,
+):
 
     src_sp = spm.SentencePieceProcessor()
     src_sp.load(f"{src_prefix}.model")
     tgt_sp = spm.SentencePieceProcessor()
     tgt_sp.load(f"{tgt_prefix}.model")
 
-    if expected_vocab_size is not None:
-        if src_sp.get_piece_size() != expected_vocab_size:
+    if expected_src_vocab_size is not None:
+        if src_sp.get_piece_size() != expected_src_vocab_size:
             raise ValueError(
-                f"Source Vocabulary size mismatch: expected {expected_vocab_size}, got {src_sp.get_piece_size()}"
+                f"Source Vocabulary size mismatch: expected {expected_src_vocab_size}, got {src_sp.get_piece_size()}"
             )
-        if tgt_sp.get_piece_size() != expected_vocab_size:
+    if expected_tgt_vocab_size is not None:
+        if tgt_sp.get_piece_size() != expected_tgt_vocab_size:
             raise ValueError(
-                f"Target Vocabulary size mismatch: expected {expected_vocab_size}, got {tgt_sp.get_piece_size()}"
+                f"Target Vocabulary size mismatch: expected {expected_tgt_vocab_size}, got {tgt_sp.get_piece_size()}"
             )
 
     return src_sp, tgt_sp
@@ -408,7 +414,8 @@ def PrepareData(model_cfg, data_cfg, train_cfg, global_step_value=None):
     from config import CorpusConfig
 
     # 1. Train Tokenizers (if not exists)
-    vocab_size = model_cfg.vocab_size
+    vocab_size_src = model_cfg.vocab_size_src
+    vocab_size_tgt = model_cfg.vocab_size_tgt
     model_prefix_src = data_cfg.tokenizer_prefix_src
     model_prefix_tgt = data_cfg.tokenizer_prefix_tgt
 
@@ -425,7 +432,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg, global_step_value=None):
         train_tokenizer(
             tokenizer_train_src,
             model_prefix_src,
-            vocab_size,
+            vocab_size_src,
             char_coverage=data_cfg.char_coverage,
             input_sentence_size=data_cfg.input_sentence_size,
             pad_id=model_cfg.pad_id,
@@ -439,7 +446,7 @@ def PrepareData(model_cfg, data_cfg, train_cfg, global_step_value=None):
         train_tokenizer(
             tokenizer_train_tgt,
             model_prefix_tgt,
-            vocab_size,
+            vocab_size_tgt,
             char_coverage=data_cfg.char_coverage,
             input_sentence_size=data_cfg.input_sentence_size,
             pad_id=model_cfg.pad_id,
@@ -450,7 +457,10 @@ def PrepareData(model_cfg, data_cfg, train_cfg, global_step_value=None):
 
     # 2. Load Tokenizers
     src_sp, tgt_sp = load_tokenizers(
-        model_prefix_src, model_prefix_tgt, expected_vocab_size=vocab_size
+        model_prefix_src,
+        model_prefix_tgt,
+        expected_src_vocab_size=vocab_size_src,
+        expected_tgt_vocab_size=vocab_size_tgt,
     )
 
     # 3. Create Streaming Datasets

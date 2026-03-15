@@ -211,8 +211,8 @@ class Seq2SeqTransformer(nn.Module):
         super().__init__()
         self.config = config
 
-        self.src_tok_emb = TokenEmbedding(config.vocab_size, config.d_model)
-        self.tgt_tok_emb = TokenEmbedding(config.vocab_size, config.d_model)
+        self.src_tok_emb = TokenEmbedding(config.vocab_size_src, config.d_model)
+        self.tgt_tok_emb = TokenEmbedding(config.vocab_size_tgt, config.d_model)
         self.positional_encoding = PositionalEncoding(
             config.d_model, dropout=config.dropout, max_len=config.max_len
         )
@@ -256,7 +256,7 @@ class Seq2SeqTransformer(nn.Module):
         )
 
         # Always use bias for the generator
-        self.generator = nn.Linear(config.d_model, config.vocab_size, bias=True)
+        self.generator = nn.Linear(config.d_model, config.vocab_size_tgt, bias=True)
         if config.tie_decoder_embeddings:
             self.generator.weight = self.tgt_tok_emb.embedding.weight
 
@@ -378,7 +378,7 @@ class Seq2SeqTransformer(nn.Module):
         num_tokens = mask.sum()
 
         loss = nn.functional.cross_entropy(
-            logits.reshape(-1, self.config.vocab_size),
+            logits.reshape(-1, self.config.vocab_size_tgt),
             tgt_out.reshape(-1),
             ignore_index=self.config.pad_id,
             label_smoothing=label_smoothing,
@@ -462,7 +462,7 @@ class Seq2SeqTransformer(nn.Module):
         # inputs: (bs, beam_size, seq_len)
         inputs = torch.full((bs, beam_size, 1), bos_id, dtype=torch.long, device=device)
 
-        vocab_size = self.config.vocab_size
+        vocab_size = self.config.vocab_size_tgt
 
         for i in range(max_len):
             curr_seq_len = inputs.size(2)

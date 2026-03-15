@@ -57,8 +57,8 @@ def profile_training_step(model_cfg=None, train_cfg=None):
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr)
 
     # Prepare a dummy batch
-    src = torch.randint(0, model_cfg.vocab_size, (32, 50), device=device)
-    tgt = torch.randint(0, model_cfg.vocab_size, (32, 55), device=device)
+    src = torch.randint(0, model_cfg.vocab_size_src, (32, 50), device=device)
+    tgt = torch.randint(0, model_cfg.vocab_size_tgt, (32, 55), device=device)
 
     # Warmup
     for _ in range(5):

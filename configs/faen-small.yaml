@@ -5,7 +5,8 @@ model:
   dec_layers: 2
   n_heads: 8
   max_len: 512
-  vocab_size: 20000
+  vocab_size_src: 20000
+  vocab_size_tgt: 20000
   mlp_type: "gated"
   activation: "gelu"
 
