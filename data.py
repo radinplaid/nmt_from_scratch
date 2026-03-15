@@ -24,6 +24,10 @@ class StreamingTextDataset(IterableDataset):
         pad_multiple: int = 16,
         global_step_value=None,
         infinite: bool = True,
+        src_spm_alpha: float = 1.0,
+        tgt_spm_alpha: float = 1.0,
+        src_spm_nbest_size: int = 0,
+        tgt_spm_nbest_size: int = 0,
     ):
         self.corpora = corpora
         self.src_sp = src_sp
@@ -37,6 +41,10 @@ class StreamingTextDataset(IterableDataset):
         self.pad_multiple = pad_multiple
         self.global_step_value = global_step_value
         self.infinite = infinite
+        self.src_spm_alpha = src_spm_alpha
+        self.tgt_spm_alpha = tgt_spm_alpha
+        self.src_spm_nbest_size = src_spm_nbest_size
+        self.tgt_spm_nbest_size = tgt_spm_nbest_size
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -178,10 +186,20 @@ class StreamingTextDataset(IterableDataset):
                                 continue
 
                         s_ids = self.src_sp.encode(
-                            s.strip(), out_type=int, add_bos=True, add_eos=True
+                            s.strip(),
+                            out_type=int,
+                            add_bos=True,
+                            add_eos=True,
+                            alpha=self.src_spm_alpha,
+                            nbest_size=self.src_spm_nbest_size,
                         )
                         t_ids = self.tgt_sp.encode(
-                            t.strip(), out_type=int, add_bos=True, add_eos=True
+                            t.strip(),
+                            out_type=int,
+                            add_bos=True,
+                            add_eos=True,
+                            alpha=self.tgt_spm_alpha,
+                            nbest_size=self.tgt_spm_nbest_size,
                         )
 
                         if (
@@ -449,6 +467,10 @@ def PrepareData(model_cfg, data_cfg, train_cfg, global_step_value=None):
         pad_id=model_cfg.pad_id,
         pad_multiple=data_cfg.pad_multiple,
         global_step_value=global_step_value,
+        src_spm_nbest_size=data_cfg.src_spm_nbest_size,
+        tgt_spm_nbest_size=data_cfg.tgt_spm_nbest_size,
+        src_spm_alpha=data_cfg.src_spm_alpha,
+        tgt_spm_alpha=data_cfg.tgt_spm_alpha,
     )
 
     dev_corpora = [

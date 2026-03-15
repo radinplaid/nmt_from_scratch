@@ -76,6 +76,12 @@ class DataConfig:
     prefetch_factor: int = 64
     pad_multiple: int = 16
 
+    # N-best sampling
+    src_spm_nbest_size: int = 1
+    tgt_spm_nbest_size: int = 1
+    src_spm_alpha: float = 0.0
+    tgt_spm_alpha: float = 0.0
+
 
 @dataclass
 class TrainConfig:
