@@ -255,7 +255,10 @@ class Seq2SeqTransformer(nn.Module):
             ),
         )
 
+        # Always use bias for the generator
         self.generator = nn.Linear(config.d_model, config.vocab_size, bias=True)
+        if config.tie_decoder_embeddings:
+            self.generator.weight = self.tgt_tok_emb.embedding.weight
 
         # Initialize parameters
         for p in self.parameters():

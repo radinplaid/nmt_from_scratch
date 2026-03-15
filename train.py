@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from aim import Run
-from safetensors.torch import save_file, load_file
+from safetensors.torch import load_file, save_model
 from shutil import copyfile
 
 from config import DataConfig, ModelConfig, TrainConfig
@@ -81,7 +81,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     model = Seq2SeqTransformer(model_cfg).to(device)
 
     # Convert model to precision for reduced memory footprint
-    if device.type == "cuda" and train_cfg.precision == "bf16":
+    if device.type == "cuda" and train_cfg.precision in ("bf16", "bfloat16"):
         model = model.to(dtype=torch.bfloat16)
 
     # Checkpoint loading (weights)
@@ -119,7 +119,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
             state_dict = load_file(weights_path, device=device.type)
             # Remove _orig_mod. prefix if present in state_dict (shouldn't be, but safe)
             state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-            model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict, strict=False)
 
     model = torch.compile(model)
 
@@ -222,16 +222,14 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
         if not os.path.exists(config.checkpoint_dir):
             os.makedirs(config.checkpoint_dir)
 
+        # Use save_model instead of save_file to handle shared tensors (tied embeddings)
+        # We need to unwrap the model to get the underlying structure for save_model
+        raw_model = model.module if hasattr(model, "module") else model
+        if hasattr(raw_model, "_orig_mod"):
+            raw_model = raw_model._orig_mod
+
         path = os.path.join(config.checkpoint_dir, f"model_{step}.safetensors")
-        # Handle torch.compile wrapper if present
-        state_dict = (
-            model.module.state_dict()
-            if hasattr(model, "module")
-            else model.state_dict()
-        )
-        # Remove prefix from torch.compile (_orig_mod.)
-        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-        save_file(state_dict, path)
+        save_model(raw_model, path)
         print(f"{get_time_info()} Model weights saved: {path}")
 
         # Save full state (optimizer, scheduler) in .pt for resuming
@@ -312,7 +310,9 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
 
         # Use inference_mode instead of no_grad for better performance
         autocast_dtype = (
-            torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
+            torch.bfloat16
+            if train_cfg.precision in ("bf16", "bfloat16")
+            else torch.float32
         )
 
         with torch.inference_mode():
@@ -404,7 +404,9 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None):
     # Loop
     model.train()
     optimizer.zero_grad()
-    autocast_dtype = torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
+    autocast_dtype = (
+        torch.bfloat16 if train_cfg.precision in ("bf16", "bfloat16") else torch.float32
+    )
 
     start_time = time.time()
     total_loss_sum = 0

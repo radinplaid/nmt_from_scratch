@@ -20,6 +20,7 @@ class ModelConfig:
     mlp_type: str = "gated"  # "standard" or "gated"
     layernorm_eps: float = 1e-5
     norm_type: str = "rmsnorm"  # "layernorm" or "rmsnorm"
+    tie_decoder_embeddings: bool = False
 
     # Special Tokens
     pad_id: int = 0

@@ -2,7 +2,7 @@ import torch
 import os
 import argparse
 import json
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file, save_model
 from config import load_config
 from model import Seq2SeqTransformer
 from data import PrepareData
@@ -108,7 +108,10 @@ def main():
     torch.save({"model_state_dict": avg_state_dict}, pt_output)
 
     st_output = f"{export_cfg.output_prefix}.safetensors"
-    save_file(avg_state_dict, st_output)
+    # Create model to handle shared tensors correctly during save
+    model = Seq2SeqTransformer(model_cfg).to("cpu")
+    model.load_state_dict(avg_state_dict, strict=False)
+    save_model(model, st_output)
     print(f"Saved averaged model to {pt_output} and {st_output}")
 
     # 4. Calibration and INT8 Export
@@ -125,7 +128,7 @@ def main():
 
         # Load averaged weights BEFORE preparing for quantization
         print("Loading averaged weights...")
-        model.load_state_dict(avg_state_dict)
+        model.load_state_dict(avg_state_dict, strict=False)
         model.eval()
 
         # Prepare model for Post-Training Quantization (PTQ)
@@ -192,7 +195,9 @@ def main():
         for k in keys_to_remove:
             del dequantized_state_dict[k]
 
-        save_file(dequantized_state_dict, st_int8_output)
+        temp_model = Seq2SeqTransformer(model_cfg).to("cpu")
+        temp_model.load_state_dict(dequantized_state_dict, strict=False)
+        save_model(temp_model, st_int8_output)
         print(f"Saved dequantized INT8 model to {st_int8_output}")
 
 

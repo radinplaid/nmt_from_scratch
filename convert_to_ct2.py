@@ -2,7 +2,6 @@ import numpy as np
 import ctranslate2
 import os
 import argparse
-import torch
 from safetensors.torch import load_file
 from config import load_config
 from collections import OrderedDict
@@ -66,7 +65,7 @@ def set_layer_norm(spec, state_dict, prefix):
             spec.gamma = weight.detach().float().cpu().numpy()
         else:
             spec.gamma = weight.numpy()
-    
+
     # Only set beta if the spec supports it (RMSNorm spec doesn't have beta)
     if hasattr(spec, "beta"):
         if bias is not None:
@@ -177,7 +176,9 @@ def convert_vocab(sp_vocab_path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--experiment_dir", type=str, required=True, help="Path to experiment directory")
+    parser.add_argument(
+        "--experiment_dir", type=str, required=True, help="Path to experiment directory"
+    )
     args = parser.parse_args()
 
     model_cfg, data_cfg, train_cfg, export_cfg = load_config(
@@ -186,10 +187,9 @@ def main():
 
     model_file = os.path.join(args.experiment_dir, "averaged_model.safetensors")
     if not os.path.exists(model_file):
-        raise FileNotFoundError(f"Model file not found at {model_file}")   
+        raise FileNotFoundError(f"Model file not found at {model_file}")
 
     state_dict = load_file(model_file, device="cpu")
-
 
     # Strip _orig_mod. prefix if present (from torch.compile)
     new_state_dict = OrderedDict()
@@ -210,6 +210,7 @@ def main():
 
     is_gated = getattr(model_cfg, "mlp_type", "standard") == "gated"
     use_rms_norm = getattr(model_cfg, "norm_type", "layernorm") == "rmsnorm"
+    tie_decoder_embeddings = getattr(model_cfg, "tie_decoder_embeddings", False)
 
     encoder_spec = ctranslate2.specs.TransformerEncoderSpec(
         num_layers=model_cfg.enc_layers,
@@ -239,6 +240,9 @@ def main():
         )
 
     tgt_emb = state_dict.get("tgt_tok_emb.embedding.weight")
+    if tgt_emb is None and tie_decoder_embeddings:
+        tgt_emb = state_dict.get("generator.weight")
+
     if tgt_emb is not None:
         decoder_spec.embeddings.weight = (
             tgt_emb.detach().float().cpu().numpy()
@@ -258,7 +262,17 @@ def main():
         decoder_spec.position_encodings.encodings = pe
 
     # Generator (Projection)
-    set_linear(decoder_spec.projection, state_dict, "generator")
+    if tie_decoder_embeddings:
+        decoder_spec.projection.weight = decoder_spec.embeddings.weight
+        _, gen_bias = get_layer_weights(state_dict, "generator")
+        if gen_bias is not None:
+            decoder_spec.projection.bias = gen_bias
+        else:
+            decoder_spec.projection.bias = np.zeros(
+                decoder_spec.embeddings.weight.shape[0], dtype=np.float32
+            )
+    else:
+        set_linear(decoder_spec.projection, state_dict, "generator")
 
     # 4. Encoder Layers
     for i in range(model_cfg.enc_layers):
