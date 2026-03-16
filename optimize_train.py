@@ -625,7 +625,7 @@ if __name__ == "__main__":
     def objective(trial):
         # Sample hyperparameters
         # n_heads must divide d_model
-        lr = trial.suggest_float("lr", 1e-5, 3e-3, log=True)
+        lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
         n_heads = trial.suggest_categorical("n_heads", [2, 4, 8, 16])
         activation = trial.suggest_categorical("activation", ["gelu", "silu", "relu"])
         mlp_type = trial.suggest_categorical("mlp_type", ['gated','standard'])
