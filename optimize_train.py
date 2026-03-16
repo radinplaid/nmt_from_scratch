@@ -20,6 +20,7 @@ from model import Seq2SeqTransformer
 
 def train(model_cfg=None, data_cfg=None, train_cfg=None, trial=None):
     training_start = time.time()
+    torch._dynamo.reset()
     best_ppl = float("inf")
 
     def get_time_info():
@@ -123,7 +124,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None, trial=None):
             state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
             model.load_state_dict(state_dict, strict=False)
 
-    model = torch.compile(model)
+    model = torch.compile(model, dynamic=True)
 
     if torch.cuda.device_count() > 1 and train_cfg.device in ["cuda", "auto"]:
         print(
