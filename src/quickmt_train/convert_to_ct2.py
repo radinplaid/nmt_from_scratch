@@ -1,7 +1,7 @@
 import numpy as np
 import ctranslate2
 import os
-import argparse
+import fire
 from safetensors.torch import load_file
 from .config import load_config
 from collections import OrderedDict
@@ -174,18 +174,26 @@ def convert_vocab(sp_vocab_path):
     return tokens
 
 
+import fire
+
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--experiment_dir", type=str, required=True, help="Path to experiment directory"
-    )
-    args = parser.parse_args()
+    import fire
+    fire.Fire(convert_to_ct2_cli)
 
+
+def convert_to_ct2_cli(experiment_dir: str):
+    """
+    Convert a trained model to CTranslate2 format.
+
+    Args:
+        experiment_dir: Path to experiment directory
+    """
     model_cfg, data_cfg, train_cfg, export_cfg = load_config(
-        os.path.join(args.experiment_dir, "config.yaml")
+        os.path.join(experiment_dir, "config.yaml")
     )
 
-    model_file = os.path.join(args.experiment_dir, "averaged_model.safetensors")
+    model_file = os.path.join(experiment_dir, "averaged_model.safetensors")
     if not os.path.exists(model_file):
         raise FileNotFoundError(f"Model file not found at {model_file}")
 
@@ -401,4 +409,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)

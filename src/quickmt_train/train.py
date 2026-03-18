@@ -631,29 +631,26 @@ def run_quick_test(
 
 
 def main():
-    import argparse
+    import fire
+    fire.Fire(train_cli)
 
+
+def train_cli(config: str):
+    """
+    Train a Transformer model.
+
+    Args:
+        config: Path to config file
+    """
     from .config import load_config
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, help="Path to config file")
-    args = parser.parse_args()
-
-    model_cfg = None
-    data_cfg = None
-    train_cfg = None
-    if args.config:
-        model_cfg, data_cfg, train_cfg, _ = load_config(args.config)
-
-    for i in (train_cfg, data_cfg, model_cfg):
-        assert i is not None
-        print(i)
+    model_cfg, data_cfg, train_cfg, _ = load_config(config)
 
     # Make experiment folder if not exists
     os.makedirs(train_cfg.experiment_name, exist_ok=True)
 
     # Copy config to experiment folder
-    copyfile(args.config, os.path.join(train_cfg.experiment_name, "config.yaml"))  # type: ignore
+    copyfile(config, os.path.join(train_cfg.experiment_name, "config.yaml"))  # type: ignore
 
     train(model_cfg, data_cfg, train_cfg)
 

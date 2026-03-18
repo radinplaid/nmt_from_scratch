@@ -71,18 +71,24 @@ def benchmark(model_cfg=None, data_cfg=None, train_cfg=None):
 
 
 def main():
-    import argparse
-    from .config import load_config
+    import fire
+    fire.Fire(benchmark_cli)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, help="Path to config file")
-    args = parser.parse_args()
+
+def benchmark_cli(config: str | None = None):
+    """
+    Run a training speed benchmark.
+
+    Args:
+        config: Path to config file
+    """
+    from .config import load_config
 
     model_cfg = None
     data_cfg = None
     train_cfg = None
-    if args.config:
-        model_cfg, data_cfg, train_cfg, _ = load_config(args.config)
+    if config:
+        model_cfg, data_cfg, train_cfg, _ = load_config(config)
 
     benchmark(model_cfg, data_cfg, train_cfg)
 

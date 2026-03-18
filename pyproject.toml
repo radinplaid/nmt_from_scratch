@@ -10,9 +10,18 @@ requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0",
     "aim",
+    "fire",
+    "scipy",
+    "numpy",
     "safetensors",
     "pyyaml",
     "optuna",
+    "nltk",
+    "sacremoses",
+    "datasets",
+    "sacrebleu",
+    "sentence-transformers",
+    "fasttext-wheel",
     "quickmt @ git+https://github.com/quickmt/quickmt.git"
 ]
 
@@ -26,6 +35,8 @@ quickmt-avg = "quickmt_train.average_checkpoints:main"
 quickmt-export = "quickmt_train.convert_to_ct2:main"
 quickmt-eval = "quickmt_train.evaluate:main"
 quickmt-optimize = "quickmt_train.optimize_train:main"
+quickmt-clean-embeddings = "quickmt_train.filter_static_embeddings:main"
+quickmt-clean-primary = "quickmt_train.filter_basic:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

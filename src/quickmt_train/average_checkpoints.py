@@ -1,6 +1,6 @@
 import torch
 import os
-import argparse
+import fire
 import json
 from safetensors.torch import load_file, save_model
 from .config import load_config
@@ -9,20 +9,23 @@ from .data import PrepareData
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Average the last k checkpoints and save as safetensors/INT8"
-    )
-    parser.add_argument(
-        "--experiment_dir", type=str, required=True, help="Path to experiment directory"
-    )
-    args = parser.parse_args()
+    import fire
+    fire.Fire(average_checkpoints_cli)
 
+
+def average_checkpoints_cli(experiment_dir: str):
+    """
+    Average the last k checkpoints and save as safetensors/INT8.
+
+    Args:
+        experiment_dir: Path to experiment directory
+    """
     model_cfg, data_cfg, train_cfg, export_cfg = load_config(
-        os.path.join(args.experiment_dir, "config.yaml")
+        os.path.join(experiment_dir, "config.yaml")
     )
 
     # 1. Find the best k models based on validation perplexity
-    metrics_path = os.path.join(args.experiment_dir, "metrics.jsonl")
+    metrics_path = os.path.join(experiment_dir, "metrics.jsonl")
     if os.path.exists(metrics_path):
         print(f"Reading metrics from {metrics_path}")
         metrics = []
@@ -202,4 +205,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)
