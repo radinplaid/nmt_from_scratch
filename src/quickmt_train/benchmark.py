@@ -1,12 +1,8 @@
 import torch
 import time
-import sys
-import argparse
 
-sys.path.insert(0, ".")
-from config import TrainConfig, ModelConfig, DataConfig, load_config
-from data import PrepareData
-import torch.utils.data
+from .config import TrainConfig, ModelConfig, DataConfig
+from .data import PrepareData
 
 
 def benchmark(model_cfg=None, data_cfg=None, train_cfg=None):
@@ -26,7 +22,7 @@ def benchmark(model_cfg=None, data_cfg=None, train_cfg=None):
     else:
         device = torch.device(train_cfg.device)
 
-    from model import Seq2SeqTransformer
+    from .model import Seq2SeqTransformer
 
     model = Seq2SeqTransformer(model_cfg).to(device)
     model = torch.compile(model)
@@ -74,7 +70,10 @@ def benchmark(model_cfg=None, data_cfg=None, train_cfg=None):
     print("=== End Benchmark ===")
 
 
-if __name__ == "__main__":
+def main():
+    import argparse
+    from .config import load_config
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, help="Path to config file")
     args = parser.parse_args()
@@ -86,3 +85,7 @@ if __name__ == "__main__":
         model_cfg, data_cfg, train_cfg, _ = load_config(args.config)
 
     benchmark(model_cfg, data_cfg, train_cfg)
+
+
+if __name__ == "__main__":
+    main()

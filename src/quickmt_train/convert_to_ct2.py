@@ -3,7 +3,7 @@ import ctranslate2
 import os
 import argparse
 from safetensors.torch import load_file
-from config import load_config
+from .config import load_config
 from collections import OrderedDict
 import shutil
 from pathlib import Path

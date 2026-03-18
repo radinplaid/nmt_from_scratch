@@ -1,7 +1,7 @@
 import argparse
 from time import time
 from quickmt import Translator
-from config import load_config
+from .config import load_config
 import sacrebleu
 
 

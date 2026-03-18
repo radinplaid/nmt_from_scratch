@@ -1,0 +1,35 @@
+[project]
+name = "quickmt-train"
+version = "0.1.0"
+description = "A NMT training library built from scratch with PyTorch"
+authors = [
+    { name = "quickmt"}
+]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "torch>=2.0.0",
+    "aim",
+    "safetensors",
+    "pyyaml",
+    "optuna",
+    "quickmt @ git+https://github.com/quickmt/quickmt.git"
+]
+
+[project.urls]
+Homepage = "https://github.com/quickmt"
+Repository = "https://github.com/quickmt/quickmt-train"
+
+[project.scripts]
+quickmt-train = "quickmt_train.train:main"
+quickmt-avg = "quickmt_train.average_checkpoints:main"
+quickmt-export = "quickmt_train.convert_to_ct2:main"
+quickmt-eval = "quickmt_train.evaluate:main"
+quickmt-optimize = "quickmt_train.optimize_train:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

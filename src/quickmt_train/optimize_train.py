@@ -11,11 +11,10 @@ import torch.optim as optim
 import optuna
 from aim import Run
 from safetensors.torch import load_file, save_model
-from shutil import copyfile
 
-from config import DataConfig, ModelConfig, TrainConfig
-from data import PrepareData
-from model import Seq2SeqTransformer
+from .config import DataConfig, ModelConfig, TrainConfig
+from .data import PrepareData
+from .model import Seq2SeqTransformer
 
 
 def train(model_cfg=None, data_cfg=None, train_cfg=None, trial=None):
@@ -488,7 +487,7 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None, trial=None):
                         step=global_step,
                         context={"subset": "dev"},
                     )
-                
+
                 # Update best perplexity
                 if val_metrics["ppl"] < best_ppl:
                     best_ppl = val_metrics["ppl"]
@@ -606,19 +605,23 @@ def train(model_cfg=None, data_cfg=None, train_cfg=None, trial=None):
 
             if samples_found >= train_cfg.quick_test_samples:
                 break
-    
+
     return best_ppl
 
 
-if __name__ == "__main__":
+def main():
     import argparse
     import copy
-    from config import load_config
+    from .config import load_config
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
-    parser.add_argument("--trials", type=int, default=100, help="Number of Optuna trials")
-    parser.add_argument("--study_name", type=str, default="nmt_optimization", help="Optuna study name")
+    parser.add_argument(
+        "--trials", type=int, default=100, help="Number of Optuna trials"
+    )
+    parser.add_argument(
+        "--study_name", type=str, default="nmt_optimization", help="Optuna study name"
+    )
     args = parser.parse_args()
 
     base_model_cfg, base_data_cfg, base_train_cfg, _ = load_config(args.config)
@@ -629,12 +632,14 @@ if __name__ == "__main__":
         lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
         n_heads = trial.suggest_categorical("n_heads", [2, 4, 8, 16])
         activation = trial.suggest_categorical("activation", ["gelu", "silu", "relu"])
-        mlp_type = trial.suggest_categorical("mlp_type", ['gated','standard'])
+        mlp_type = trial.suggest_categorical("mlp_type", ["gated", "standard"])
         ff_bias = trial.suggest_categorical("ff_bias", [True, False])
         dropout = trial.suggest_float("dropout", 0.0, 0.3, log=False)
         layernorm_eps = trial.suggest_float("layernorm_eps", 1e-6, 1e-4, log=True)
         norm_type = trial.suggest_categorical("norm_type", ["layernorm", "rmsnorm"])
-        tie_decoder_embeddings = trial.suggest_categorical("tie_decoder_embeddings", [True, False])
+        tie_decoder_embeddings = trial.suggest_categorical(
+            "tie_decoder_embeddings", [True, False]
+        )
         grad_clip = trial.suggest_float("grad_clip", 0.0, 2.0, log=False)
 
         # Create trial-specific configs
@@ -643,7 +648,7 @@ if __name__ == "__main__":
         train_cfg = copy.deepcopy(base_train_cfg)
 
         train_cfg.lr = lr
-        train_cfg.grad_clip = grad_clip 
+        train_cfg.grad_clip = grad_clip
         model_cfg.n_heads = n_heads
         model_cfg.activation = activation
         model_cfg.mlp_type = mlp_type
@@ -652,12 +657,12 @@ if __name__ == "__main__":
         model_cfg.layernorm_eps = layernorm_eps
         model_cfg.norm_type = norm_type
         model_cfg.tie_decoder_embeddings = tie_decoder_embeddings
-        
+
         # Unique experiment name for each trial
         # Keep commented out to re-use tokenizer etc; speeds up trials considerably
         # train_cfg.experiment_name = f"{base_train_cfg.experiment_name}_trial_{trial.number}"
         # data_cfg.experiment_name = train_cfg.experiment_name
-        
+
         # Make experiment folder
         os.makedirs(train_cfg.experiment_name, exist_ok=True)
 
@@ -671,9 +676,9 @@ if __name__ == "__main__":
         study_name=args.study_name,
         direction="minimize",
         storage=f"sqlite:///{args.study_name}.db",
-        load_if_exists=True
+        load_if_exists=True,
     )
-    
+
     study.optimize(objective, n_trials=args.trials)
 
     print("\nOptimization finished!")
@@ -682,3 +687,7 @@ if __name__ == "__main__":
     print("Best parameters:")
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")
+
+
+if __name__ == "__main__":
+    main()

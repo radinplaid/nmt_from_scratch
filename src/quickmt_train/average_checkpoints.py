@@ -3,9 +3,9 @@ import os
 import argparse
 import json
 from safetensors.torch import load_file, save_model
-from config import load_config
-from model import Seq2SeqTransformer
-from data import PrepareData
+from .config import load_config
+from .model import Seq2SeqTransformer
+from .data import PrepareData
 
 
 def main():

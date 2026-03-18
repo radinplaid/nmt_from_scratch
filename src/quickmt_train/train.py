@@ -12,9 +12,9 @@ from aim import Run
 from safetensors.torch import load_file, save_model
 from shutil import copyfile
 
-from config import DataConfig, ModelConfig, TrainConfig
-from data import PrepareData
-from model import Seq2SeqTransformer
+from .config import DataConfig, ModelConfig, TrainConfig
+from .data import PrepareData
+from .model import Seq2SeqTransformer
 
 
 def print_model_details(model, model_cfg, data_cfg, train_cfg, get_time_info):
@@ -630,10 +630,10 @@ def run_quick_test(
                 break
 
 
-if __name__ == "__main__":
+def main():
     import argparse
 
-    from config import load_config
+    from .config import load_config
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, help="Path to config file")
@@ -656,3 +656,7 @@ if __name__ == "__main__":
     copyfile(args.config, os.path.join(train_cfg.experiment_name, "config.yaml"))  # type: ignore
 
     train(model_cfg, data_cfg, train_cfg)
+
+
+if __name__ == "__main__":
+    main()

@@ -411,7 +411,7 @@ def load_file_lines(path, limit=None):
 
 
 def PrepareData(model_cfg, data_cfg, train_cfg, global_step_value=None):
-    from config import CorpusConfig
+    from .config import CorpusConfig
 
     # 1. Train Tokenizers (if not exists)
     vocab_size_src = model_cfg.vocab_size_src

@@ -5,8 +5,8 @@ import argparse
 
 sys.path.insert(0, ".")
 from train import train
-from config import TrainConfig, ModelConfig, load_config
-from data import PrepareData
+from .config import TrainConfig, ModelConfig, load_config
+from .data import PrepareData
 import torch.utils.data
 
 
@@ -50,7 +50,7 @@ def profile_training_step(model_cfg=None, train_cfg=None):
         train_cfg = TrainConfig()
 
     # Build model
-    from model import Seq2SeqTransformer
+    from .model import Seq2SeqTransformer
 
     model = Seq2SeqTransformer(model_cfg).to(device)
     model = torch.compile(model)
