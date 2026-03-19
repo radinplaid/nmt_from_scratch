@@ -1,6 +1,8 @@
 site_name: quickmt-train
 site_description: A NMT training library built from scratch with PyTorch.
 site_url: https://github.com/quickmt/quickmt-train
+repo_url: https://github.com/quickmt/quickmt-train
+repo_name: quickmt/quickmt-train
 
 theme:
   name: material

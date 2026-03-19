@@ -95,7 +95,7 @@ def evaluate_cli(
     print("=" * 30)
 
     # Show some samples
-    print("\Samples:")
+    print("\nSamples:")
     for i in range(min(5, len(hypotheses))):
         print(f"Source: {src_lines[i]}")
         print(f"Ref:    {ref_lines[i]}")

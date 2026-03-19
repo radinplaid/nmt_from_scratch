@@ -25,6 +25,13 @@ dependencies = [
     "quickmt @ git+https://github.com/quickmt/quickmt.git"
 ]
 
+[project.optional-dependencies]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
+
 [project.urls]
 Homepage = "https://github.com/quickmt"
 Repository = "https://github.com/quickmt/quickmt-train"
